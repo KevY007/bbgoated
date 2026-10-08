@@ -45,3 +45,10 @@ if(TARGET config_test AND BBGOATED)
   target_compile_definitions(redzone_audit_test PRIVATE BBHOST_REDZONE_AUDIT_TABLE_ONLY=1)
   add_test(NAME redzone_audit_test COMMAND redzone_audit_test)
 endif()
+
+# DLAA (the YoucefNabil/bbhost fork, src/host/dlaa.*): NVIDIA DLAA through the runtime-loaded
+# ngx_bridge.dll, wherever the Vulkan renderer is built.
+if(Vulkan_FOUND)
+  target_sources(bbhost PRIVATE src/host/dlaa.cpp)
+  set_source_files_properties(src/host/dlaa.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
+endif()
