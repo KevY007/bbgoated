@@ -38,7 +38,13 @@ GPU or on Linux, it stays off and the game renders exactly as before.
   flips.
 - **Depth:** the 1920x1080 depth target with the most depth-writing draws in
   the frame, copied to R32F with the existing depth-copy compute pass.
-  Standard Z (cleared to 1).
+  Standard Z (cleared to 1). The last 16 depth targets written are tracked:
+  some views (looking at certain interiors) draw into eight a frame, adding a
+  chain of 256 to 32 pixel targets. With too few slots the main depth was
+  pushed out before the anchor and those frames got no jitter and no DLSS.
+  A frame with no scene image and matching depth is skipped; the log says
+  when skipping starts and stops (`dlaa: anchor at flip ... skipped until
+  there is one`, `dlaa: a scene and its depth again ...`).
 - **Jitter:** the scene's geometry - draws that test against the main depth
   (DB_DEPTH_CONTROL Z_ENABLE), except screen-space quads (the deferred
   lights: 4-vertex strips / rect lists) - gets a sub-pixel shift of its
