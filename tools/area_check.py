@@ -80,17 +80,26 @@ import math
 import os
 from pathlib import Path
 import platform
+import queue
 import re
 import selectors
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import world_baseline  # noqa: E402  (launch_argv, file_inventory, digest)
+
+# Windows: the probe is a prebuilt DLL (scripts/build.ps1 -Probe in the
+# bbgoated workspace: clang --target=x86_64-w64-mingw32), the tools are .exe,
+# and the game's log is read on a thread - select() takes sockets only there.
+WINDOWS = os.name == "nt"
+PROBE_NAME = "mapval.dll" if WINDOWS else "mapval.so"
+EXE = ".exe" if WINDOWS else ""
 
 SCHEMA = "bbhost-area-check"
 EBOOT_109_SHA256 = "941f887a562aae054fac35af8cc8f27cf075f3d4cc2e029fb5ae2a663aaa5ae7"
@@ -271,20 +280,36 @@ def tour(areas, opts, kind):
 
 def toml_str(s):
     """A quoted value as bbhost's config reader takes it: everything between
-    the quotes as it is, no escapes - so no quote, backslash or line break."""
+    the quotes as it is, no escapes - so no quote, backslash or line break.
+    Windows paths are written with forward slashes, which bbhost takes too."""
     s = str(s)
+    if WINDOWS:
+        s = s.replace("\\", "/")
     if any(c in s for c in '"\\\n'):
         raise ValueError("a path the run's config cannot hold (a quote, backslash or line break): %r" % s)
     return '"%s"' % s
 
 
-def run_toml(app0, eboot, data, p2p_port, width, height, old_hunters=False):
+def parse_window(text):
+    """--windowed WxH as (w, h), or None."""
+    if not text:
+        return None
+    m = re.fullmatch(r"(\d+)x(\d+)", text)
+    if not m:
+        raise ValueError("--windowed takes WxH, e.g. 2560x1440: %s" % text)
+    return int(m.group(1)), int(m.group(2))
+
+
+def run_toml(app0, eboot, data, p2p_port, width, height, old_hunters=False, window=None):
+    """window: (w, h) of a visible window when the run is not headless (--windowed);
+    the game still renders at width x height."""
+    ww, wh = window or (width, height)
     lines = [
         "# tools/area_check.py: this run's own configuration - offline, on a copy of the seed.",
         "[paths]", "app0 = %s" % toml_str(app0), "data = %s" % toml_str(data), "eboot = %s" % toml_str(eboot), "",
         "[online]", 'host = "127.0.0.1"', "p2p_port = %d" % p2p_port, "",
         "# The window and what the game renders at (the Resolution setting).",
-        "[video]", "width = %d" % width, "height = %d" % height, "resolution = %s" % toml_str("%dx%d" % (width, height)), "",
+        "[video]", "width = %d" % ww, "height = %d" % wh, "resolution = %s" % toml_str("%dx%d" % (width, height)), "",
         "[startup]", "skip_intro = true", "",
         "# The developer sample and visitor plugins stay out of the measurement.",
         "[plugins]", "hello = false", "join_modded_worlds = false", ""]
@@ -296,7 +321,7 @@ def run_toml(app0, eboot, data, p2p_port, width, height, old_hunters=False):
 def pass_settings(pass_dir, areas, opts, kind):
     """The game's BBHOST_* settings for one pass."""
     s = {
-        "BBHOST_HEADLESS": "1", "BBHOST_NP_SIGNED_OUT": "1", "BBHOST_SETUP_WINDOW": "0", "BBHOST_SKIP_INTRO": "1",
+        "BBHOST_HEADLESS": "0" if opts.get("window") else "1", "BBHOST_NP_SIGNED_OUT": "1", "BBHOST_SETUP_WINDOW": "0", "BBHOST_SKIP_INTRO": "1",
         "BBHOST_CONFIG_DIR": str(pass_dir / "cfg"), "BBHOST_OPTIONS_PATH": str(pass_dir / "cfg" / "bbhost-options.toml"),
         "BBHOST_PIPELINE_CACHE": "1" if opts["pipeline_cache"] else "0",
         "BBHOST_GAME_FPS": str(opts["fps"]), "BBHOST_FRAME_STATS": "1", "BBHOST_FRAME_DETAIL": "1", "BBHOST_STALL_MS": "40",
@@ -1611,12 +1636,14 @@ def check_note(c):
 
 def tool_paths(bbhost):
     d = Path(bbhost).resolve().parent
-    return {"gcnlift": d / "gcnlift", "drawreplay": d / "drawreplay"}
+    return {"gcnlift": d / ("gcnlift" + EXE), "drawreplay": d / ("drawreplay" + EXE)}
 
 
 # --- running -------------------------------------------------------------------------
 
 def build_probe(out_so):
+    if WINDOWS:
+        raise ValueError("on Windows the probe is prebuilt: give --probe (scripts/build.ps1 -Probe makes probe/mapval.dll)")
     out_so.parent.mkdir(parents=True, exist_ok=True)
     cc = os.environ.get("CC", "cc")
     r = subprocess.run([cc, "-shared", "-fPIC", "-O2", "-Wall", "-I" + str(ROOT / "include"), "-o", str(out_so),
@@ -1639,9 +1666,9 @@ def prepare_pass(pass_dir, kind, areas, opts, paths):
     if copy != opts["seed_files"]:
         raise ValueError("the seed's copy in %s differs from the seed" % (pass_dir / "data"))
     (pass_dir / "data" / "plugins").mkdir(exist_ok=True)
-    shutil.copy2(opts["probe"], pass_dir / "data" / "plugins" / "mapval.so")
+    shutil.copy2(opts["probe"], pass_dir / "data" / "plugins" / PROBE_NAME)
     toml = run_toml(paths["app0"], paths["eboot"], pass_dir / "data", opts["p2p_port"], opts["width"], opts["height"],
-                    old_hunters=any(a.dlc for a in areas))
+                    old_hunters=any(a.dlc for a in areas), window=opts.get("window"))
     (pass_dir / "cfg" / "bbhost.toml").write_text(toml)
     (pass_dir / "tour.txt").write_text(tour(areas, opts, kind))
     settings = pass_settings(pass_dir, areas, opts, kind)
@@ -1671,6 +1698,53 @@ def title_tap(requests, n, hold_ms=None):
     os.replace(tmp, requests / ("title-%03d.req" % n))
 
 
+class PipeReader:
+    """The part of a selector launch() uses, over one pipe, for Windows -
+    whose select() takes sockets only: a thread reads, select() waits on it."""
+
+    class _Key:
+        def __init__(self, f):
+            self.fileobj = f
+
+    def __init__(self, f):
+        self._q = queue.Queue()
+        self._key = PipeReader._Key(f)
+        self._open = True
+        self._next = None
+        threading.Thread(target=self._pump, args=(f,), daemon=True).start()
+
+    def _pump(self, f):
+        try:
+            while True:
+                chunk = f.read1(65536)
+                self._q.put(chunk)
+                if not chunk:
+                    return
+        except (OSError, ValueError):
+            self._q.put(b"")
+
+    def get_map(self):
+        return self._open
+
+    def select(self, timeout=None):
+        if self._next is None:
+            try:
+                self._next = self._q.get(timeout=timeout)
+            except queue.Empty:
+                return []
+        return [(self._key, None)]
+
+    def read(self, key):
+        chunk, self._next = self._next, None
+        return chunk
+
+    def unregister(self, fileobj):
+        self._open = False
+
+    def close(self):
+        pass
+
+
 def launch(pass_dir, plan, say):
     """Runs the game until the tour is done (or it dies, or the budget is out),
     with its log in run.log. Until the world's first frame it presses confirm
@@ -1685,10 +1759,12 @@ def launch(pass_dir, plan, say):
     stop_reason, term_at, pending = None, None, b""
     world = done = read_one = False
     with (pass_dir / "run.log").open("wb") as log:
+        session = {} if WINDOWS else {"start_new_session": True}
         with subprocess.Popen(plan["argv"], cwd=pass_dir, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              start_new_session=True) as proc:
-            sel = selectors.DefaultSelector()
-            sel.register(proc.stdout, selectors.EVENT_READ)
+                              **session) as proc:
+            sel = PipeReader(proc.stdout) if WINDOWS else selectors.DefaultSelector()
+            if not WINDOWS:
+                sel.register(proc.stdout, selectors.EVENT_READ)
             try:
                 while sel.get_map():
                     now = time.monotonic()
@@ -1701,14 +1777,17 @@ def launch(pass_dir, plan, say):
                         title_tap(requests, taps, None if read_one else TITLE_TAP_SEARCH_MS)
                         next_tap = now + TITLE_TAP_EVERY_S
                     if stop_reason and term_at is None:
-                        proc.send_signal(signal.SIGTERM)
+                        if WINDOWS:
+                            proc.terminate()  # TerminateProcess: Windows has no SIGTERM to catch
+                        else:
+                            proc.send_signal(signal.SIGTERM)
                         term_at = now
                     if term_at is not None and now - term_at > 15 and proc.poll() is None:
                         proc.kill()
                     if term_at is not None and now - term_at > 30:
                         break  # something else holds the pipe open; the game is gone
                     for key, _ in sel.select(timeout=0.25):
-                        chunk = os.read(key.fd, 65536)
+                        chunk = sel.read(key) if WINDOWS else os.read(key.fd, 65536)
                         if not chunk:
                             sel.unregister(key.fileobj)
                             continue
@@ -1885,7 +1964,8 @@ def resolve_options(args):
                  "fps": args.fps, "captures": args.captures, "capture_window": args.capture_window,
                  "pipeline_cache": args.pipeline_cache == "seed", "p2p_port": args.p2p_port, "width": args.width,
                  "height": args.height, "env": args.env, "keep_data": args.keep_data, "keep_captures": args.keep_captures,
-                 "numa_node": numa, "seed": str(seed)})
+                 "numa_node": numa, "seed": str(seed), "window": parse_window(getattr(args, "windowed", None)),
+                 "probe_arg": getattr(args, "probe", None)})
     if opts["measure"] < 5 or opts["settle"] < 0 or opts["dumps"] < 0 or opts["dumps"] > 8 or opts["captures"] < 0:
         raise ValueError("--measure must be 5 s or more, --settle and --captures not negative, --dumps 0-8")
     return areas, {"app0": str(Path(app0).resolve()), "eboot": str(Path(eboot).resolve())}, opts
@@ -1930,8 +2010,13 @@ def do_run(args, bbhost=None, out=None, captures=True, say=print):
         raise ValueError("; ".join(problems))
     say("area check: %d places, %s" % (len(areas), ", ".join(a.id for a in areas)))
     opts["seed_files"] = world_baseline.file_inventory(seed)
-    opts["probe"] = out / "probe" / "mapval.so"
-    build_probe(opts["probe"])
+    if opts.get("probe_arg"):
+        opts["probe"] = Path(opts["probe_arg"]).resolve()
+        if not opts["probe"].is_file():
+            raise ValueError("no probe at %s" % opts["probe"])
+    else:
+        opts["probe"] = out / "probe" / PROBE_NAME
+        build_probe(opts["probe"])
     kinds = ["perf"] + (["capture"] if do_captures else [])
     plans = {k: prepare_pass(out / k, k, areas, opts, paths) for k in kinds}
     checks = check_areas(areas, paths["app0"])
@@ -2096,6 +2181,9 @@ def add_run_options(p):
     p.add_argument("--p2p-port", type=int, default=9446, help="the run's own P2P port (never the one a player's game uses)")
     p.add_argument("--width", type=int, default=1920)
     p.add_argument("--height", type=int, default=1080)
+    p.add_argument("--windowed", metavar="WxH", help="a visible window of this size instead of headless (the game still renders "
+                   "at --width x --height): for what depends on the window, the light grid's tiles among it")
+    p.add_argument("--probe", help="a prebuilt probe plugin; required on Windows (scripts/build.ps1 -Probe: probe/mapval.dll)")
     p.add_argument("--env", action="append", default=[], metavar="BBHOST_NAME=VALUE", help="another setting for the game (repeatable)")
     p.add_argument("--keep-data", action="store_true", help="keep each pass's copy of the seed")
     p.add_argument("--keep-captures", action="store_true", help="keep captures whose lift was shown identical (~50 MB each)")
