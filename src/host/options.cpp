@@ -1,4 +1,5 @@
 #include "host/options.h"
+#include "host/options_carry.h"
 #include "host/updater.h"
 #include "host/settings.h"
 
@@ -17,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <fstream>
+#include <iterator>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -668,6 +670,12 @@ void save() {
         return;
     }
     const std::string path = options_path();
+#if defined(BBHOST_BBGOATED)
+    // The file is bbhost's too: what it held before this save, for the keys this
+    // build does not know (host/options_carry.h).
+    std::string carried_from;
+    if (std::ifstream in{path, std::ios::binary}) carried_from.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+#endif
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) {
         host_log("options: cannot write %s", path.c_str());
@@ -689,6 +697,9 @@ void save() {
                      net::account_token().c_str());
     }
     std::fclose(f);
+#if defined(BBHOST_BBGOATED)
+    options_carry_apply(path, carried_from);
+#endif
     g_dirty = false;
     host_log("options: saved %s", path.c_str());
 }
