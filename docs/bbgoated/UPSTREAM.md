@@ -30,13 +30,13 @@ Rows: upstream SHA | picked SHA | source | reason. Column 1 is plain text on pur
 
 | Upstream SHA | Picked SHA | Source | Reason |
 |---|---|---|---|
-| 8ea60f6 | 9150683 | upstream/master (PR #92) | libc ctype table; merged upstream 2026-10-11 |
-| 69580d6 | bcebd4a | upstream/master (PR #92) | libc rand: the guest's 30-bit LCG on Windows (AI rolls, Make Contact); merged upstream |
-| 1822748 | 3d6a548 | upstream/master (PR #79) | setup window scaling (Wayland); merged upstream |
-| 9c71024 | 1374eca | upstream/master (PR #79) | setup window scaling follow-up; merged upstream |
-| 6bab81d | 401cc7b | upstream PR #74 (open) | TLS setup shared by sceHttp and account calls, Windows native CA trust for non-Schannel curl; no URL, header or UA change (online path: allowed) |
-| e57427b | c18a4a6 | upstream PR #70 (open) | chromatic aberration toggle works on Windows (the user's log: "cannot place chromatic aberration's stub") |
-| 021112f | 0fbb284 | upstream PR #117 (open) | dispatch-trace records only inside the coverage window (~14 MiB/min leak in v0.2.18) |
+| 8ea60f6 | cfc81e0 | upstream/master (PR #92) | libc ctype table; merged upstream 2026-10-11 |
+| 69580d6 | 0bbf4b6 | upstream/master (PR #92) | libc rand: the guest's 30-bit LCG on Windows (AI rolls, Make Contact); merged upstream |
+| 1822748 | 5db407e | upstream/master (PR #79) | setup window scaling (Wayland); merged upstream |
+| 9c71024 | 681720a | upstream/master (PR #79) | setup window scaling follow-up; merged upstream |
+| 6bab81d | 43039cf | upstream PR #74 (open) | TLS setup shared by sceHttp and account calls, Windows native CA trust for non-Schannel curl; no URL, header or UA change (online path: allowed) |
+| e57427b | ba04e60 | upstream PR #70 (open) | chromatic aberration toggle works on Windows (the user's log: "cannot place chromatic aberration's stub") |
+| 021112f | 9377e61 | upstream PR #117 (open) | dispatch-trace records only inside the coverage window (~14 MiB/min leak in v0.2.18) |
 
 ## Releases
 

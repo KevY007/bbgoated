@@ -65,7 +65,7 @@ bbgoated changes how it is drawn and patched, never how it talks to other player
 - **Development workspace:** the spec, implementation plans, research reports (what every
   upstream project does and why bbgoated is built this way) and the build/test scripts are
   in the companion repo
-  [bbgoated-workspace](https://github.com/rehabdev/bbgoated-workspace).
+  [bbgoated-workspace](https://github.com/KevY007/bbgoated-workspace).
 
 ## Online etiquette
 

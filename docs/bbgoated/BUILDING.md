@@ -18,7 +18,7 @@ wsl -d archlinux -u root -- bash -lc "pacman-key --init; pacman-key --populate a
 A **full** clone. The tags drive the version string, which the online server sees as `bbhost/<version>`.
 
 ```bash
-git clone https://github.com/<you>/bbgoated.git
+git clone https://github.com/KevY007/bbgoated.git
 cd bbgoated
 git switch bbgoated/main
 ```
