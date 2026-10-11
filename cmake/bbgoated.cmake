@@ -19,7 +19,7 @@ endif()
 
 # bbgoated's host-side additions (src/host/bbgoated.*): the other-instance warning.
 if(BBGOATED)
-  target_sources(bbhost PRIVATE src/host/bbgoated.cpp src/host/redzone_audit.cpp)
+  target_sources(bbhost PRIVATE src/host/bbgoated.cpp src/host/redzone_audit.cpp src/host/options_carry.cpp)
 endif()
 
 # The patch manifests' cpu_vendor gate (engine/patch_cpu.*), tested on its own.
@@ -37,4 +37,11 @@ if(TARGET config_test AND BBGOATED)
   target_include_directories(redzone_audit_test PRIVATE src)
   target_compile_definitions(redzone_audit_test PRIVATE BBHOST_REDZONE_AUDIT_TABLE_ONLY=1)
   add_test(NAME redzone_audit_test COMMAND redzone_audit_test)
+endif()
+
+# The shared options file keeps keys bbgoated does not know (host/options_carry.*).
+if(TARGET config_test AND BBGOATED)
+  add_executable(options_carry_test tests/options_carry_test.cpp src/host/options_carry.cpp)
+  target_include_directories(options_carry_test PRIVATE src)
+  add_test(NAME options_carry_test COMMAND options_carry_test)
 endif()
