@@ -1,0 +1,15 @@
+# yogesh1239's Sprint Fix (High FPS), as bbport ships it (patches/Bloodborne.xml,
+# "Sprint Fix (High FPS)"): the wall detector multiplied one frame's
+# displacement by 30.0 (the constant at 0x492632c), a 30 fps rule that halves
+# sprint above ~90 fps and at random moments above that (bbhost #66). It
+# divides by the frame's time instead ([rbp-0x74]); at 30 fps that is the same
+# 30. Off with `sprint-fix = false` under [patches].
+[patch]
+name = "sprint-fix"
+eboot = "941f887a562aae054fac35af8cc8f27cf075f3d4cc2e029fb5ae2a663aaa5ae7"
+description = "sprint keeps its speed above 90 fps: the wall detector measures speed, not distance per frame"
+
+[site.wall-detector]
+address = "0x01914c24"
+expect = "c5 fa 59 05 00 17 41 03"
+bytes = "c5 fa 5e 45 8c 0f 1f 00"
