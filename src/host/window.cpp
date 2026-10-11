@@ -1,4 +1,5 @@
 #include "host/window.h"
+#include "host/bbgoated.h"
 #include "core/host_clock.h"
 #include "core/portable.h"
 
@@ -1156,11 +1157,11 @@ void text_title_locked() {
     if (g_text_want) {
         std::string shown = g_entry.text;
         if (g_text_hidden) shown.assign(g_entry.length(), '*');
-        const std::string t = "Bloodborne (bbhost)  |  " + g_text_label + ": " + shown +
+        const std::string t = BBHOST_WINDOW_TITLE "  |  " + g_text_label + ": " + shown +
                               "_   (Enter = OK, Esc = cancel, Ctrl+V = paste)";
         SDL_SetWindowTitle(g_window, t.c_str());
     } else {
-        SDL_SetWindowTitle(g_window, "Bloodborne (bbhost)");
+        SDL_SetWindowTitle(g_window, BBHOST_WINDOW_TITLE);
     }
 #endif
 }
