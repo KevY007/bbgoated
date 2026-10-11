@@ -21,3 +21,12 @@ endif()
 if(BBGOATED)
   target_sources(bbhost PRIVATE src/host/bbgoated.cpp)
 endif()
+
+# The patch manifests' cpu_vendor gate (engine/patch_cpu.*), tested on its own.
+if(TARGET config_test)
+  add_executable(patch_manifest_cpu_test tests/patch_manifest_cpu_test.cpp src/engine/patch_cpu.cpp)
+  target_include_directories(patch_manifest_cpu_test PRIVATE src)
+  add_test(NAME patch_manifest_cpu_test COMMAND patch_manifest_cpu_test)
+endif()
+# Every build: the manifests read cpu_vendor (engine/patch_manifest.cpp).
+target_sources(bbhost PRIVATE src/engine/patch_cpu.cpp)

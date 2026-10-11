@@ -5,6 +5,7 @@
 #include "core/memory.h"
 #include "core/portable.h"
 #include "engine/addr.h"
+#include "engine/patch_cpu.h"
 #include "gcn/container.h"
 #include "hle/fs.h"
 #include "host/settings.h"
@@ -32,6 +33,7 @@ struct Site {
 
 struct Manifest {
     std::string path, name, eboot, description, option;
+    std::string cpu_vendor;  // [patch] cpu_vendor: only on that vendor's CPUs (engine/patch_cpu.h)
     bool enabled = true;
     std::vector<Site> sites;
 };
@@ -72,6 +74,7 @@ bool parse_manifest(const std::string& path, Manifest* m, std::string* err) {
     m->eboot = get("patch.eboot");
     m->description = get("patch.description");
     m->option = get("patch.option");
+    m->cpu_vendor = get("patch.cpu_vendor");
     const std::string en = get("patch.enabled");
     m->enabled = en.empty() || en == "true" || en == "1";
     if (m->name.empty() || m->eboot.empty()) {
@@ -298,6 +301,11 @@ void patch_manifests_apply(ElfImage* image) {
             continue;
         }
         if (!m.enabled) continue;
+        if (!patch_cpu_vendor_ok(m.cpu_vendor, host_cpu_vendor())) {
+            host_log("patch: %s skipped: for %s CPUs, this is %s", m.name.c_str(), m.cpu_vendor.c_str(),
+                     host_cpu_vendor().c_str());
+            continue;
+        }
         if (patch_manifest_off(m.name)) {
             host_log("patch: %s off ([patches] in bbhost.toml: the setup window's Patches tab)", m.name.c_str());
             continue;
