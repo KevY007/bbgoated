@@ -1,5 +1,6 @@
 #include "engine/frame_pool.h"
 #include "host/bbgoated.h"
+#include "host/redzone_audit.h"
 #include "engine/key_prompts.h"
 #include "decomp/decomp.h"
 #include "engine/mouse_camera.h"
@@ -925,6 +926,7 @@ int main(int argc, char** argv) {
     }
 #if defined(BBHOST_BBGOATED)
     bbgoated_warn_other_instances();
+    redzone_audit_install();  // BBHOST_REDZONE_AUDIT=1; registered after the write watch's, so it sees the faults first
 #endif
 #if defined(BBHOST_HAVE_SDL3)
     {

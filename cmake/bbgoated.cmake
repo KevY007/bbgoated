@@ -19,7 +19,7 @@ endif()
 
 # bbgoated's host-side additions (src/host/bbgoated.*): the other-instance warning.
 if(BBGOATED)
-  target_sources(bbhost PRIVATE src/host/bbgoated.cpp)
+  target_sources(bbhost PRIVATE src/host/bbgoated.cpp src/host/redzone_audit.cpp)
 endif()
 
 # The patch manifests' cpu_vendor gate (engine/patch_cpu.*), tested on its own.
@@ -30,3 +30,11 @@ if(TARGET config_test)
 endif()
 # Every build: the manifests read cpu_vendor (engine/patch_manifest.cpp).
 target_sources(bbhost PRIVATE src/engine/patch_cpu.cpp)
+
+# The red-zone audit's site table (host/redzone_audit.*), tested on its own.
+if(TARGET config_test AND BBGOATED)
+  add_executable(redzone_audit_test tests/redzone_audit_test.cpp src/host/redzone_audit.cpp)
+  target_include_directories(redzone_audit_test PRIVATE src)
+  target_compile_definitions(redzone_audit_test PRIVATE BBHOST_REDZONE_AUDIT_TABLE_ONLY=1)
+  add_test(NAME redzone_audit_test COMMAND redzone_audit_test)
+endif()
