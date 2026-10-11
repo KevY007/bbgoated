@@ -22,8 +22,9 @@ bbgoated changes how it is drawn and patched, never how it talks to other player
 - **Online** on [The Hunter's Dream](https://thehuntersdream.com), as a bbhost client.
   - It plays co-op, invasions, messages and bloodstains with ordinary bbhost players.
   - It uses the same account: bbgoated reads the account bbhost already linked.
-  - The online code is byte-identical to upstream's. A check script fails any build where
-    bbgoated touches it (`docs/bbgoated/UPSTREAM.md`).
+  - The online code is upstream's. The one exception is upstream's own pending TLS fix (PR #74),
+    taken ahead of its merge. Before every release, a check script in the workspace repo
+    confirms that bbgoated added nothing else there (`docs/bbgoated/UPSTREAM.md`).
 - **Controls**: keyboard and mouse (Dark Souls III-style mouse camera, rebindable keys,
   key prompts), controller, the in-game PC menus.
 - **Gameplay**: the game's own code, bbhost's decompiled functions at upstream's revision,
@@ -33,9 +34,8 @@ bbgoated changes how it is drawn and patched, never how it talks to other player
 
 | Change | Why | Switch |
 |---|---|---|
-| Based on bbhost's next release (`release/next-steps`) | The flip-after-GPU fix (light flicker when the GPU is at 99%), correct physics and timing at 60/90/120 fps, more shaders lifted | n/a |
+| Based on bbhost's next release (`release/next-steps`) | The flip-after-GPU fix (light flicker when the GPU is at 99%), correct physics and timing at 60/90/120 fps - sprint keeps its speed above 90 fps (bbhost #66) among them - and more shaders lifted | n/a |
 | Upstream fixes ahead of their merge: TLS trust (#74), chromatic aberration toggle on Windows (#70), a ~14 MiB/min trace leak (#117) | Windows bugs | n/a |
-| Sprint fix above 90 fps (yogesh1239's, as bbport ships it) | Sprint drops to half speed at high frame rates (bbhost #66) | `sprint-fix = false` under `[patches]` |
 | Intel tone-map fix (Kyo's), Intel CPUs only | Dark/black tone mapping in DLC areas on Intel CPUs | `intel-tonemap = false` under `[patches]` |
 | Shares bbhost's config; keeps its own data folder | Your settings, keys and account carry over; your bbhost saves are never written (bbgoated starts from a copy) | `[paths] data` in `bbgoated.toml` |
 | Light-grid tile basis switch | Measures window-sized vs render-sized light tiles | `BBHOST_LIGHT_GRID_BASIS=render` |
@@ -88,8 +88,8 @@ other project it tracks.
 - **The Hunter's Dream:** droogie and team.
 - **DLAA fork:** YoucefNabil. **DLSS/FSR/frame-generation work (PR #73), PRs #70, #74 and #117:** FIocker.
 - **bbport:** deadinside28. **Windows port:** Supermedo. **Red-zone site list (Supermedo PR #2):** DarkSpartan.
-- **Community patches:** yogesh1239 (sprint fix), Kyo (60 FPS++, tone-map fix, The Old
-  Hunters patch), Lance McDonald, illusion, emoose.
+- **Community patches:** Kyo (60 FPS++, tone-map fix, The Old Hunters patch), Lance McDonald,
+  illusion, emoose.
 - **References:** [shadPS4](https://github.com/shadps4-emu/shadPS4).
 
 ## License

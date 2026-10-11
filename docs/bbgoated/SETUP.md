@@ -64,7 +64,6 @@ Patch switches go under `[patches]` in `%APPDATA%\bbhost\bbgoated.toml`. Environ
 
 | What | Default | Switch |
 |---|---|---|
-| Sprint fix above 90 fps | on | `sprint-fix = false` |
 | Intel tone-map fix | on, on Intel CPUs only | `intel-tonemap = false` |
 | The Old Hunters | on | `old-hunters = false` |
 | Light-grid tiles from the render size instead of the window | off | `BBHOST_LIGHT_GRID_BASIS=render` |
@@ -73,7 +72,7 @@ Patch switches go under `[patches]` in `%APPDATA%\bbhost\bbgoated.toml`. Environ
 
 ## 6. Troubleshooting
 
-- **Logs:** `logs\bbhost-<date>.log` in the bbgoated folder. Its first lines name the version, for example `bbhost v0.2.18-bbgoated.1`, plus the config layers it read and the data folder it used.
+- **Logs:** `logs\bbgoated-<date>.log` in the bbgoated folder, or `logs\bbhost-<date>.log` when a source build is started with `run-bbhost.bat`. Its first lines name the version, for example `bbhost v0.2.18-bbgoated.1`, plus the config layers it read and the data folder it used.
 - **"eboot sha256 ... is not the 1.09 build":** decrypt the eboot (UnfSelf, ps4_unfself) or redump.
 - **Black screen or broken frame after an update:** delete the shader caches in `%LOCALAPPDATA%\bbgoated\data\bbhost\`. They are rebuilt.
 - **Summons don't connect:** check the firewall, and make sure bbhost isn't running at the same time.
