@@ -42,6 +42,7 @@ Rows: upstream SHA | picked SHA | source | reason. Column 1 is plain text on pur
 
 | Tag | Base | Notes |
 |---|---|---|
+| v0.2.18-bbgoated.2 | next-steps 63c1cea | replaces .1: sprint-fix.toml dropped (the base owns that site), the shared options file keeps unknown keys, upstream file modes kept; checked at 60/90/120 fps that all 23 per-frame redirects install |
 | v0.2.18-bbgoated.1 | next-steps 63c1cea | WITHDRAWN: its sprint-fix.toml wrote over 0x1914c24, a site the base's frame-rate code owns, which then refused all 23 per-frame redirects at 60/90/120 fps (fixed in .2). First bbgoated build: next-steps base, PRs #92/#79/#74/#70/#117, sprint and Intel tone-map fixes, config isolation (BBGOATED=ON), light-grid basis switch, red-zone audit; no upscalers yet |
 
 ## Rebase procedure (new upstream release or next-steps update)
