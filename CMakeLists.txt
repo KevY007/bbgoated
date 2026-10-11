@@ -628,3 +628,6 @@ else()
     DEPENDS bbhost
     USES_TERMINAL)
 endif()
+
+# bbgoated additions (cmake/bbgoated.cmake).
+include(cmake/bbgoated.cmake OPTIONAL)

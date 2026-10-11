@@ -1,4 +1,5 @@
 #include "engine/frame_pool.h"
+#include "host/bbgoated.h"
 #include "engine/key_prompts.h"
 #include "decomp/decomp.h"
 #include "engine/mouse_camera.h"
@@ -922,6 +923,9 @@ int main(int argc, char** argv) {
         host_log("docs/running.md: where the configuration is looked for and what to put in it");
         return 2;
     }
+#if defined(BBHOST_BBGOATED)
+    bbgoated_warn_other_instances();
+#endif
 #if defined(BBHOST_HAVE_SDL3)
     {
         // The setup window (host/launcher.h): when the game's paths are
@@ -1052,7 +1056,7 @@ int main(int argc, char** argv) {
     host_log("config: %s headless=%d %dx%d", cfg.config_layers.empty() ? "(none)" : cfg.config_layers.c_str(),
              cfg.headless ? 1 : 0, cfg.width, cfg.height);
     if (!cfg.headless) {
-        windowed = host_window_start(cfg.width, cfg.height, "Bloodborne (bbhost)");
+        windowed = host_window_start(cfg.width, cfg.height, BBHOST_WINDOW_TITLE);
         if (!windowed) {
             host_log("running headless");
         } else {
