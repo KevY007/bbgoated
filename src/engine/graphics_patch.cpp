@@ -873,6 +873,11 @@ std::uint32_t g_tile_fixed[2] = {0, 0};             // BBHOST_LIGHT_GRID=WxH: th
 // each): 4 a side 1,878-2,027, one tile 1,960-2,096 (+5%), the main loop's
 // work 3.51 against 3.50 ms - the quarter tiles stay the default.
 std::uint32_t g_tiles_per_axis = 4;
+// BBHOST_LIGHT_GRID_BASIS=render (bbgoated): the tiles from the render size even
+// with a window of another size - a 1920x1080 picture in a 2560x1440 window
+// bins against 480x270 tiles, not 640x360. A/B against the window basis
+// (tools/area_check.py --windowed); the default stays the window's.
+bool g_basis_render = false;
 std::uint64_t g_tile_from = 0;
 bool g_task_steal = false;                          // BBHOST_TASK_TUNE=s (task_tune_install, below)                      // BBHOST_LIGHT_GRID_FROM=flip: the game's tiles before it (A/B in one run)
 
@@ -884,6 +889,7 @@ void light_grid_tick() {
     if (g_task_steal) *reinterpret_cast<std::uint8_t*>(static_cast<std::uintptr_t>(gm + 0x78bd)) = 1;
     int ww = 0, wh = 0;
     host_window_pixels(&ww, &wh);
+    if (g_basis_render) ww = wh = 0;  // BBHOST_LIGHT_GRID_BASIS=render
 
     // The grid follows the window - the presented image, or the display in
     // fullscreen - not the render size: a 2560x1440 picture shown in a
@@ -967,6 +973,7 @@ void light_grid_install(ElfImage* image) {
         return;
     }
     if (const char* e = std::getenv("BBHOST_LIGHT_GRID_FROM"); e && *e) g_tile_from = std::strtoull(e, nullptr, 10);
+    if (const char* e = std::getenv("BBHOST_LIGHT_GRID_BASIS"); e && std::strcmp(e, "render") == 0) g_basis_render = true;
     if (const char* e = std::getenv("BBHOST_LIGHT_GRID"); e && std::strcmp(e, "window") == 0) g_tiles_per_axis = 1;
     if (const char* e = std::getenv("BBHOST_LIGHT_GRID"); e && std::strchr(e, 'x')) {
         g_tile_fixed[0] = static_cast<std::uint32_t>(std::atoi(e));
@@ -987,8 +994,8 @@ void light_grid_install(ElfImage* image) {
     div[1] = 1;
     g_res_words = static_cast<const std::uint32_t*>(guest_ptr(image->mem, at(0x55289f8)));  // res_width, res_height (below)
     g_graphics_manager = static_cast<const std::uint64_t*>(guest_ptr(image->mem, at(kGraphicsManagerSlot)));
-    host_log("graphics: light grid - one job of %ux%u tiles sized to the window (was 3x3 jobs of 128x128 tiles; BBHOST_LIGHT_GRID=window: one window-sized tile)",
-             g_tiles_per_axis, g_tiles_per_axis);
+    host_log("graphics: light grid - one job of %ux%u tiles sized to the %s (was 3x3 jobs of 128x128 tiles; BBHOST_LIGHT_GRID=window: one window-sized tile)",
+             g_tiles_per_axis, g_tiles_per_axis, g_basis_render ? "render size (BBHOST_LIGHT_GRID_BASIS=render)" : "window");
 }
 
 // The flip during which the scene's view was last drawn, plus one (0: none
