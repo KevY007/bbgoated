@@ -54,6 +54,11 @@ namespace gpu {
 
 // NGX's result, for the window thread (bbgoated's anti-aliasing coupling).
 std::atomic<bool> g_dlaa_ngx_ok{false};
+// Failed for the session after NGX started (fail_locked), and idle: ten seconds
+// of 3D frames since the last DLAA frame. Either way the game's anti-aliasing
+// is not held off for it (dlaa_running).
+std::atomic<bool> g_dlaa_off{false};
+std::atomic<bool> g_dlaa_idle{false};
 
 namespace {
 
@@ -175,6 +180,7 @@ struct State {
     std::uint64_t depth_writes = 0, depth_writes_at_anchor = ~0ull;
     std::uint64_t anchors_this_frame = 0, anchors_last_frame = 0;
     std::uint64_t anchor_calls = 0, first_depth_flip = 0;
+    std::uint64_t last_eval_flip = 0;  // bbgoated: the flip of the last frame DLAA resolved
     bool anchor_missing_said = false;
     std::uint64_t evaluations = 0, failures = 0;
     std::chrono::steady_clock::time_point last_eval{};
@@ -442,6 +448,7 @@ void fail_locked(const char* why) {
     host_log("dlaa: %s - off for this session; the game renders unchanged", why);
     release_locked();
     g_s.failed = true;
+    g_dlaa_off.store(true, std::memory_order_release);
 }
 
 // Images and the DLSS feature for a scene of this size and format. False
@@ -674,6 +681,13 @@ void dlaa_after_draw_locked(const DrawRec& r) {
                 host_log("dlaa: 600 flips of 3D frames without the anchor pipeline; DLAA is not running (BBHOST_DLAA_ANCHOR names another)");
             }
         }
+        // bbgoated: 3D frames for ten seconds since the last DLAA frame (no anchor,
+        // or none with its scene and depth): DLAA is idle, and the game's
+        // anti-aliasing is not held off for it until DLAA resolves frames again.
+        if (g_s.last_eval_flip && slot->flip > g_s.last_eval_flip + 600 && !g_dlaa_idle.load(std::memory_order_relaxed)) {
+            g_dlaa_idle.store(true, std::memory_order_relaxed);
+            host_log("dlaa: 600 flips of 3D frames since the last DLAA frame; the game's anti-aliasing is not held off until DLAA runs again");
+        }
     }
     if (g_cb.phase != 2 || !g_dlaa_cb_capturing.load(std::memory_order_relaxed)) {
         cb_tick_locked();
@@ -875,6 +889,16 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
     }
     for (State::Depth& d : g_s.depths) d.writes = 0;
     if (g_s.failed) return;
+    // BBHOST_TEST_DLAA_FAIL=<flip>: DLAA fails for the session at that flip once
+    // it has resolved frames - the anti-aliasing hold's release is tested with it.
+    static const std::uint64_t test_fail_flip = [] {
+        const char* e = std::getenv("BBHOST_TEST_DLAA_FAIL");
+        return e ? std::strtoull(e, nullptr, 10) : 0ull;
+    }();
+    if (test_fail_flip && flip >= test_fail_flip && g_s.evaluations) {
+        fail_locked("BBHOST_TEST_DLAA_FAIL");
+        return;
+    }
     if (!scene) {
         ++g_s.skipped;
         if (g_s.skipped_run++ == 0) {
@@ -987,6 +1011,8 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
     memory_barrier(cmd);
     scene->fill_last = false;
     g_s.reset = false;
+    g_s.last_eval_flip = flip;
+    g_dlaa_idle.store(false, std::memory_order_relaxed);
     // The next frame's jitter: Halton(2, 3) over 16 frames, centred.
     if (g_s.jitter_mode.load(std::memory_order_relaxed) == 0) {
         g_s.jitter_index = g_s.jitter_index % 16 + 1;
@@ -1012,7 +1038,8 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
 namespace gpu {
 
 bool dlaa_running() {
-    return config_on() && g_dlaa_ngx_ok.load(std::memory_order_acquire) && g_s.enabled.load(std::memory_order_relaxed);
+    return dlaa_active(config_on(), g_dlaa_ngx_ok.load(std::memory_order_acquire), g_dlaa_off.load(std::memory_order_acquire),
+                       g_dlaa_idle.load(std::memory_order_relaxed), g_s.enabled.load(std::memory_order_relaxed));
 }
 
 // bbgoated: the pump loop's thread, every pass. While DLAA runs, the game's own
