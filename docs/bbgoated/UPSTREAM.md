@@ -41,6 +41,7 @@ Pieces of unmerged work re-applied as bbgoated commits (`bbg/upscale:`), with th
 
 | Source | bbgoated commit | What | Left out |
 |---|---|---|---|
+| upstream-pr/73 at 539d45f | bbg/upscale: ngx_bridge ABI v2 from PR #73 (this commit) | tools/ngx_bridge (ABI v2) | none |
 | upstream-pr/73 at 539d45f (on 566184a) | (filled by Tasks 3-7) | | frame generation (85d81a9's rows included), Reflex, presenter/frame-loop timing (pr73-port.md table B) |
 
 The DLAA fork's picks above (ae0b56f, 8e42461, in the tracked refs) give way to PR #73's versions of the same files when (a1) and (a2) land: pr73-port.md, section E.

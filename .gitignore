@@ -21,6 +21,11 @@ compile_commands.json
 __pycache__/
 /bbhost-options.toml
 build-win/
+/build-dev/
+/build-ngx/
+/*-configure.log
+/*-compile.log
+/build-*.log
 build-linux-portable/
 /build-ci/
 # Private working notes and the eboot's symbol files stay out of the repository.
@@ -28,3 +33,8 @@ build-linux-portable/
 /symbols/
 # The DLSS SDK and Vulkan headers ngx_bridge builds against (docs/dlaa.md).
 /tools/ngx_bridge/external/
+# NVIDIA's runtime and SDK never enter the repository (bbgoated: scripts/check-no-nvidia-binaries.ps1).
+nvngx_*.dll
+ngx_bridge.dll
+nvsdk_ngx*.lib
+/fsr4_shaders/
