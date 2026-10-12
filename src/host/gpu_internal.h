@@ -730,6 +730,7 @@ bool depth_copy_available_locked();
 bool depth_copy_record_locked(VkImage depth, VkFormat depth_format, VkImage dst, std::uint32_t width, std::uint32_t height);
 bool untile_gpu_available_locked();
 void untile_gpu_record_locked(const UntileGpuPass& pass);
+void untile_gpu_record_to_locked(VkCommandBuffer cmd, const UntileGpuPass& pass);  // bbgoated: into cmd, or recorder ops (null)
 // A compare run's pair (BBHOST_GPU_UNTILE=2): the GPU's untile and the CPU's
 // of the same upload, checked when the slot that wrote them has retired.
 struct UntileCheck {

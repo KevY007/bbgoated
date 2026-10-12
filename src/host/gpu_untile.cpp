@@ -71,6 +71,22 @@ void untile_gpu_record_locked(const UntileGpuPass& pass) {
     vkCmdDispatch(cmd, (pass.width_e + 7) / 8, (pass.height_e + 7) / 8, pass.slices);
 }
 
+// bbgoated (host/perf/vk/tex_upload.cpp, BBHOST_BBG_TEX_UPLOAD): the same pass
+// into `cmd` (an upload buffer), or as recorder ops when `cmd` is null.
+void untile_gpu_record_to_locked(VkCommandBuffer cmd, const UntileGpuPass& pass) {
+    const Push push{pass.src,     pass.dst,  pass.src_slice_bytes, pass.dst_slice_bytes, pass.width_e, pass.height_e,
+                    pass.pitch_e, pass.esize, pass.mode,           pass.bank_height,     pass.aspect,  pass.banks};
+    if (!cmd) {
+        rec().bind_pipeline(VK_PIPELINE_BIND_POINT_COMPUTE, g_pipeline);
+        rec().push_constants(g_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+        rec().dispatch((pass.width_e + 7) / 8, (pass.height_e + 7) / 8, pass.slices);
+        return;
+    }
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pipeline);
+    vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+    vkCmdDispatch(cmd, (pass.width_e + 7) / 8, (pass.height_e + 7) / 8, pass.slices);
+}
+
 void untile_checks_run_locked(std::vector<UntileCheck>& checks) {
     for (const UntileCheck& c : checks) {
         g_checked.fetch_add(1, std::memory_order_relaxed);

@@ -2,6 +2,7 @@
 // stage's user data become Vulkan images (untiled on upload) and samplers.
 // Render targets sampled as textures alias the render target image.
 #include "host/gpu_internal.h"
+#include "host/perf/vk/tex_upload.h"
 
 #if !defined(_WIN32)
 #include <dlfcn.h>
@@ -1151,23 +1152,25 @@ bool upload_surface(Surface& sf, VkImageAspectFlags aspect, bool first) {
     }
     t_part = std::chrono::steady_clock::now();
     begin_recording_locked();
-    render_end_pass_locked();
+    // bbgoated (host/perf/vk/tex_upload.cpp, BBHOST_BBG_TEX_UPLOAD): recorder ops, or ahead of the submission's work.
+    UploadCmds uc = upload_cmds_for_locked(sf.base, sf.total_src, first, sf.gpu_written || cpu_copy.map != nullptr);
+    if (!uc.early()) render_end_pass_locked();
     if (in_vram) {
         // Whatever wrote the guest bytes on the GPU before this is done, then
         // they cross the bus once.
         VkMemoryBarrier rb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         rb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         rb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(g_cmd(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &rb, 0, nullptr, 0, nullptr);
+        uc.barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, &rb, nullptr);
         static const std::string fetch_name = "tex-fetch";
         profile_begin_locked(&fetch_name);
         const VkBufferCopy fetch{vram_src.offset, vram_off, sf.total_src};
-        vkCmdCopyBuffer(g_cmd(), vram_src.buffer, vram.buffer, 1, &fetch);
+        uc.copy_buffer(vram_src.buffer, vram.buffer, fetch);
         profile_end_locked();
         VkMemoryBarrier fb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         fb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         fb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(g_cmd(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &fb, 0, nullptr, 0, nullptr);
+        uc.barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, &fb, nullptr);
         g_untiled_vram.fetch_add(1, std::memory_order_relaxed);
         g_untiled_vram_bytes.fetch_add(sf.total_src, std::memory_order_relaxed);
     }
@@ -1175,24 +1178,23 @@ bool upload_surface(Surface& sf, VkImageAspectFlags aspect, bool first) {
         if (cpu_copy.map) {
             // A compare: the GPU's span starts from zeros as the CPU's copy
             // did, so elements neither writes (past a 2D slice) agree.
-            vkCmdFillBuffer(g_cmd(), staging.buffer, staging_offset, (sf.total_dst + 3) & ~std::size_t{3}, 0);
+            uc.fill_buffer(staging.buffer, staging_offset, (sf.total_dst + 3) & ~std::size_t{3}, 0);
             VkMemoryBarrier fb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
             fb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             fb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            vkCmdPipelineBarrier(g_cmd(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &fb, 0, nullptr, 0,
-                                 nullptr);
+            uc.barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, &fb, nullptr);
             g.slots[g.slot].untile_checks.push_back(
                 {static_cast<const std::uint8_t*>(staging.map), static_cast<const std::uint8_t*>(cpu_copy.map), sf.total_dst, sf.base});
         }
         // BBHOST_GPU_PROFILE: the untile and the copy as entries of their own.
         static const std::string untile_name = "tex-untile";
         profile_begin_locked(&untile_name);
-        for (const UntileGpuPass& pass : passes) untile_gpu_record_locked(pass);
+        for (const UntileGpuPass& pass : passes) uc.untile(pass);
         profile_end_locked();
         VkMemoryBarrier ub{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         ub.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         ub.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(g_cmd(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &ub, 0, nullptr, 0, nullptr);
+        uc.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, &ub, nullptr);
         g_gpu_untiled.fetch_add(1, std::memory_order_relaxed);
         g_gpu_untiled_bytes.fetch_add(sf.total_dst, std::memory_order_relaxed);
     }
@@ -1206,7 +1208,7 @@ bool upload_surface(Surface& sf, VkImageAspectFlags aspect, bool first) {
     b.subresourceRange = {aspect, 0, nlevels, 0, layers};
     b.srcAccessMask = first ? 0 : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
     b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(g_cmd(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    uc.barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, nullptr, &b);
     std::vector<VkBufferImageCopy> regions;
     for (std::uint32_t l = 0; l < nlevels; ++l) {
         const Surface::Level& lv = sf.levels[l];
@@ -1221,14 +1223,14 @@ bool upload_surface(Surface& sf, VkImageAspectFlags aspect, bool first) {
     }
     static const std::string upload_copy_name = "tex-upload-copy";
     profile_begin_locked(&upload_copy_name);
-    vkCmdCopyBufferToImage(g_cmd(), in_vram ? vram.buffer : staging.buffer, sf.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           static_cast<std::uint32_t>(regions.size()), regions.data());
+    uc.copy_buffer_to_image(in_vram ? vram.buffer : staging.buffer, sf.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                            static_cast<std::uint32_t>(regions.size()), regions.data());
     profile_end_locked();
     b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(g_cmd(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    uc.barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, nullptr, &b);
     // The staging span is free for reuse once this command buffer retired.
     g_tex_record_us.fetch_add(us_since(t_part), std::memory_order_relaxed);
     sf.exact_at_ms = now_ms();
