@@ -72,9 +72,19 @@ Patch switches go under `[patches]` in `%APPDATA%\bbgoated\bbgoated.toml`. Envir
 |---|---|---|
 | Intel tone-map fix | on, on Intel CPUs only | `intel-tonemap = false` |
 | The Old Hunters | on | `old-hunters = false` |
+| NVIDIA DLAA (RTX cards; other GPUs skip it) | on | `enabled = false` under `[dlaa]`; `Ctrl+F1` or `Ctrl+F5` in game |
+| DLAA's DLSS preset (a letter, e.g. `K`) | the driver's | `preset = "K"` under `[dlaa]` |
 | Light-grid tiles from the render size instead of the window | off | `BBHOST_LIGHT_GRID_BASIS=render` |
 | Red-zone audit (observe-only diagnostics) | off | `BBHOST_REDZONE_AUDIT=1` |
 | Every upstream bbhost switch | as upstream | `docs/running.md` |
+
+### DLAA
+
+On an NVIDIA RTX card bbgoated runs NVIDIA's DLAA on the game's HDR scene, before its post-processing. It needs two NVIDIA files beside `bbgoated.exe`: `ngx_bridge.dll` and `nvngx_dlss.dll`. Packaged builds include them, with NVIDIA's license (`NVIDIA-DLSS-LICENSE.txt`). For a source build, copy them from the [DLAA fork's release](https://github.com/YoucefNabil/bbhost/releases). Without them, or on another GPU, the game renders exactly as in bbhost.
+
+- While DLAA runs, the game's own anti-aliasing (System > Graphics) is held off: on top of DLAA it would only blur. Your setting is kept in `bbgoated-options.toml`, and it comes back as soon as DLAA is turned off.
+- `Ctrl+F1` turns DLAA off and on while you play (`Ctrl+F5` does the same, for keyboards where another program takes `Ctrl+F1`). The log says `dlaa: on` or `dlaa: off`.
+- The log's `dlaa: NGX init ok` line, after the first loaded area, means it is running.
 
 ## 6. Troubleshooting
 
