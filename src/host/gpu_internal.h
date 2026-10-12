@@ -1460,6 +1460,91 @@ struct DrawLibraryState {
     float bias_constant = 0.0f, bias_clamp = 0.0f, bias_slope = 0.0f;
     VkBool32 depth_clamp = 0;  // under g.dynamic_depth_clamp
 };
+// bbgoated (BBHOST_BBG_DYN_FIELDS, BBHOST_BBG_BIND_DEDUP): upstream PR #100's
+// field-wise library state and binding proof, in its words, behind bbgoated's
+// switches (render.cpp draw_impl); draw_library_changes is defined here rather
+// than in recorder.cpp so tests/bbg_draw_dedup_test.cpp can call it.
+enum DrawLibraryField : std::uint32_t {
+    kLibraryCull = 1u << 0, kLibraryFront = 1u << 1,
+    kLibraryDepthTest = 1u << 2, kLibraryDepthWrite = 1u << 3,
+    kLibraryDepthCompare = 1u << 4, kLibraryBoundsTest = 1u << 5,
+    kLibraryStencilTest = 1u << 6, kLibraryFrontOps = 1u << 7,
+    kLibraryBackOps = 1u << 8, kLibraryBias = 1u << 9,
+    kLibraryDepthClamp = 1u << 10, kLibraryAll = (1u << 11) - 1,
+};
+// Compare only values consumed by vkCmdSet*, not padding or the stencil
+// masks/reference (record_stencil_words owns those). Float bits matter.
+inline std::uint32_t draw_library_changes(const DrawLibraryState& a, const DrawLibraryState& b) {
+    std::uint32_t fields = 0;
+    if (a.cull != b.cull) fields |= kLibraryCull;
+    if (a.front != b.front) fields |= kLibraryFront;
+    if (a.depth_test != b.depth_test) fields |= kLibraryDepthTest;
+    if (a.depth_write != b.depth_write) fields |= kLibraryDepthWrite;
+    if (a.depth_compare != b.depth_compare) fields |= kLibraryDepthCompare;
+    if (a.bounds_test != b.bounds_test) fields |= kLibraryBoundsTest;
+    if (a.stencil_test != b.stencil_test) fields |= kLibraryStencilTest;
+    auto ops_differ = [](const VkStencilOpState& x, const VkStencilOpState& y) {
+        return x.failOp != y.failOp || x.passOp != y.passOp || x.depthFailOp != y.depthFailOp || x.compareOp != y.compareOp;
+    };
+    if (ops_differ(a.front_ops, b.front_ops)) fields |= kLibraryFrontOps;
+    if (ops_differ(a.back_ops, b.back_ops)) fields |= kLibraryBackOps;
+    if (std::memcmp(&a.bias_constant, &b.bias_constant, sizeof(float)) ||
+        std::memcmp(&a.bias_clamp, &b.bias_clamp, sizeof(float)) ||
+        std::memcmp(&a.bias_slope, &b.bias_slope, sizeof(float))) fields |= kLibraryBias;
+    if (a.depth_clamp != b.depth_clamp) fields |= kLibraryDepthClamp;
+    return fields;
+}
+
+// Producer-side binding proof shared by the renderer and its stream tests.
+// It lives only within one recording, and is reset after helper graphics work.
+// Exact layout handles imply compatibility for ALL preceding sets and push
+// ranges; sets 0/1 must still be rebound with every draw's dynamic offsets.
+struct DrawBindingState {
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkDescriptorSet bindless = VK_NULL_HANDLE;
+    std::uint32_t pushes = 0, bindings[2 * gcn::kMaxBuffers]{};
+    VkDescriptorBufferInfo infos[2 * gcn::kMaxBuffers]{};
+    std::uint32_t vertices = 0;
+    VkBuffer vb[16]{};
+    VkDeviceSize offsets[16]{};
+    void use_layout(VkPipelineLayout now) {
+        if (layout == now) return;
+        layout = now;
+        bindless = VK_NULL_HANDLE;
+        pushes = 0;
+    }
+    bool bind_global(VkDescriptorSet now) {
+        if (bindless == now) return false;
+        bindless = now;
+        return true;
+    }
+    bool push(const std::uint32_t* now_bindings, const VkDescriptorBufferInfo* now_infos, std::uint32_t n) {
+        if (n > 2 * gcn::kMaxBuffers) { pushes = 0; return true; }
+        bool same = n == pushes;
+        for (std::uint32_t i = 0; same && i < n; ++i)
+            same = bindings[i] == now_bindings[i] && infos[i].buffer == now_infos[i].buffer &&
+                   infos[i].offset == now_infos[i].offset && infos[i].range == now_infos[i].range;
+        if (same) return false;
+        pushes = n;
+        std::memcpy(bindings, now_bindings, n * sizeof(*bindings));
+        std::memcpy(infos, now_infos, n * sizeof(*infos));
+        return true;
+    }
+    bool vertex(const VkBuffer* buffers, const VkDeviceSize* now_offsets, std::uint32_t n) {
+        if (n > 16) { vertices = 0; return true; }
+        bool same = n == vertices;
+        for (std::uint32_t i = 0; same && i < n; ++i)
+            same = vb[i] == buffers[i] && offsets[i] == now_offsets[i];
+        if (same) return false;
+        vertices = n;
+        std::memcpy(vb, buffers, n * sizeof(*vb));
+        std::memcpy(offsets, now_offsets, n * sizeof(*offsets));
+        return true;
+    }
+};
+// render.cpp: another recorder bound graphics state in this command buffer;
+// the next draw records its pipeline, state and bindings again (bbgoated).
+void render_forget_recorded_state_locked();
 struct DrawCall {
     enum Kind { kDirect, kIndexed, kIndirect, kIndexedIndirect } kind = kDirect;
     std::uint32_t count = 0, instances = 0;
@@ -1477,7 +1562,7 @@ struct DrawCall {
     VkDeviceSize cond_offset = 0;
 };
 constexpr std::uint32_t kMaxVertexBindings = 16;
-void record_library_state(VkCommandBuffer cmd, const DrawLibraryState& s, bool has_depth_bounds);
+void record_library_state(VkCommandBuffer cmd, const DrawLibraryState& s, bool has_depth_bounds, std::uint32_t fields = kLibraryAll);
 void record_stencil_words(VkCommandBuffer cmd, const std::uint32_t words[6]);
 void record_draw_call(VkCommandBuffer cmd, const DrawCall& call);
 
@@ -1506,7 +1591,7 @@ public:
     void take_sets(std::vector<VkWriteDescriptorSet>& writes, std::vector<VkDescriptorImageInfo>& images,
                    const std::vector<VkDescriptorBufferInfo>& buffers, const VkDescriptorBufferInfo* extra, std::size_t n_extra);
     void bind_pipeline(VkPipeline pipeline);
-    void library_state(const DrawLibraryState& s, bool has_depth_bounds);
+    void library_state(const DrawLibraryState& s, bool has_depth_bounds, std::uint32_t fields = kLibraryAll);
     // `dynamic`: the params blocks' offsets (set_cache_on()), else null.
     // `bindless`: the pipeline's stages read the global set, bound as set 3.
     void bind_sets(VkPipelineLayout layout, const VkDescriptorSet sets[2], const std::uint32_t* dynamic = nullptr, bool bindless = false);

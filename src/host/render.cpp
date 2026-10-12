@@ -9079,11 +9079,26 @@ struct RecordedState {
     // Pipelines linked from libraries: the state they take per draw.
     bool library_set = false;
     DrawLibraryState library{};
+    DrawBindingState bindings{};  // bbgoated (BBHOST_BBG_BIND_DEDUP): what is bound beside sets 0 and 1
     VkBuffer index_buffer = VK_NULL_HANDLE;
     VkDeviceSize index_offset = 0;
     VkIndexType index_type = VK_INDEX_TYPE_UINT16;
 };
 static RecordedState g_recorded;
+
+// bbgoated (BBHOST_BBG_DYN_FIELDS / _BIND_DEDUP, upstream PR #100's ideas):
+// library state recorded field by field, identical binds left out.
+static bool dyn_fields_on() {
+    static const bool v = bbg::perf_on("DYN_FIELDS");
+    return v;
+}
+static bool bind_dedup_on() {
+    static const bool v = bbg::perf_on("BIND_DEDUP");
+    return v;
+}
+// bbgoated: another recorder bound graphics state in this command buffer
+// (Phase 2's evaluate passes call this): the next draw records everything again.
+void gpu::render_forget_recorded_state_locked() { g_recorded = RecordedState{}; }
 
 namespace {
 
@@ -14787,6 +14802,12 @@ static bool draw_impl(const GpuDraw& d) {
         // them all again, not only what changed.
         if (!bind_pl->library) g_recorded.library_set = false;
     }
+    // bbgoated (BBHOST_BBG_BIND_DEDUP): a different pipeline layout forgets the binds and the library state (PR #100).
+    const VkPipelineLayout dedup_layout = bind_pl->layout ? bind_pl->layout : g.gfx_pipe_layout;
+    if (bind_dedup_on()) {
+        if (g_recorded.bindings.layout != dedup_layout) g_recorded.library_set = false;
+        g_recorded.bindings.use_layout(dedup_layout);
+    }
     if (bind_pl->library) {  // BBHOST_PIPELINE_LIBRARY: rasterizer, depth and stencil state per draw
         GfxFixedState d;
         fixed_raster_depth(s, d);
@@ -14813,7 +14834,9 @@ static bool draw_impl(const GpuDraw& d) {
         }
         now.depth_clamp = g.dynamic_depth_clamp && d.depth_clamp ? VK_TRUE : VK_FALSE;
         if (!g_recorded.library_set || std::memcmp(&g_recorded.library, &now, sizeof(now)) != 0) {
-            cmds.library_state(now, g.has_depth_bounds);
+            // bbgoated (BBHOST_BBG_DYN_FIELDS): only the fields that changed (PR #100's draw_library_changes)
+            cmds.library_state(now, g.has_depth_bounds,
+                               dyn_fields_on() && g_recorded.library_set ? draw_library_changes(g_recorded.library, now) : kLibraryAll);
             g_recorded.library = now;
             g_recorded.library_set = true;
         }
@@ -14853,7 +14876,9 @@ static bool draw_impl(const GpuDraw& d) {
     }
     const std::uint32_t params_offsets[2] = {static_cast<std::uint32_t>(ubi[0].offset), static_cast<std::uint32_t>(ubi[1].offset)};
     const VkPipelineLayout draw_layout = bind_pl->layout ? bind_pl->layout : g.gfx_pipe_layout;
-    cmds.bind_sets(draw_layout, sets, set_cache_on() ? params_offsets : nullptr, bind_pl->vs.meta().bindless);
+    // bbgoated (BBHOST_BBG_BIND_DEDUP): the bindless set once per layout; sets 0 and 1 are bound at every draw (PR #100).
+    const bool bind_global = bind_pl->vs.meta().bindless && (!bind_dedup_on() || g_recorded.bindings.bind_global(g.bindless_set));
+    cmds.bind_sets(draw_layout, sets, set_cache_on() ? params_offsets : nullptr, bind_global);
     if (tess_set && bind_pl == set4_pl) cmds.bind_stage_set(draw_layout, kTessNativeSet, tess_set, tess_set_dynamic, tess_set_offsets);
     if (cb_push_on() && any_buffers) {
         // The draw's constant buffers, each bound over its own range.
@@ -14867,7 +14892,7 @@ static bool draw_impl(const GpuDraw& d) {
                 ranges[n] = buffer_infos[stage_first_buffer[st] + i];
             }
         }
-        cmds.push_buffers(draw_layout, bindings, ranges, n);
+        if (!bind_dedup_on() || g_recorded.bindings.push(bindings, ranges, n)) cmds.push_buffers(draw_layout, bindings, ranges, n);  // bbgoated
     }
     draw_stamp.to(kRenderCostBindCmds);
     // Viewport: screen = offset + ndc * scale (y scale is negative on GCN for a y-down framebuffer).
@@ -14980,7 +15005,9 @@ static bool draw_impl(const GpuDraw& d) {
         }
     }
     if (use_vertex_input) {
-        cmds.vertex_buffers(static_cast<std::uint32_t>(vertex_input.bindings.size()), vertex_input.buffer, vertex_input.offset);
+        const auto nvb = static_cast<std::uint32_t>(vertex_input.bindings.size());
+        if (!bind_dedup_on() || g_recorded.bindings.vertex(vertex_input.buffer, vertex_input.offset, nvb))  // bbgoated (BBHOST_BBG_BIND_DEDUP)
+            cmds.vertex_buffers(nvb, vertex_input.buffer, vertex_input.offset);
     }
     draw_stamp.to(kRenderCostGeometry);
     if (g.cmd_buffer_marker) {
