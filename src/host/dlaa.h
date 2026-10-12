@@ -32,6 +32,15 @@
 
 namespace gpu {
 
+// bbgoated: whether a temporal reconstruction runs now - DLAA enabled, NGX ready, not failed or idle,
+// not switched off with Ctrl+F1; DLSS super resolution and FSR join it with their own inputs.
+// dlaa_running() is the same, by its older name.
+bool reconstruction_running();
+bool dlaa_running();
+// bbgoated, main.cpp's pump loop (with or without a window): the game's anti-aliasing held off while
+// a reconstruction runs (host/dlaa_aa.h).
+void dlaa_aa_tick();
+
 struct DrawRec;
 struct RtImage;
 

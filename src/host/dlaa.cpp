@@ -1,5 +1,7 @@
 // See dlaa.h.
 #include "host/dlaa.h"
+#include "host/dlaa_aa.h"  // bbgoated: the anti-aliasing hold
+#include "host/options.h"  // bbgoated: host_opt_hold, host_opt_release
 
 #include "core/config.h"
 #include "hle/modules.h"
@@ -29,6 +31,14 @@
 #include "../../tools/ngx_bridge/ngx_bridge.h"
 
 namespace gpu {
+
+// bbgoated: the anti-aliasing hold's inputs for the pump loop's thread (reconstruction_running):
+// NGX started, DLAA off for the session (fail_locked, or NGX that did not start), and DLAA
+// idle - ten seconds of 3D frames since the last frame it resolved.
+std::atomic<bool> g_dlaa_ngx_ok{false};
+std::atomic<bool> g_dlaa_off{false};
+std::atomic<bool> g_dlaa_idle{false};
+
 namespace {
 
 [[maybe_unused]] constexpr int kBridgeVersion = NGXB_VERSION;
@@ -184,6 +194,7 @@ struct State {
     std::uint64_t anchors_this_frame = 0, anchors_last_frame = 0;
     std::uint64_t anchor_calls = 0, first_depth_flip = 0;
     bool anchor_missing_said = false;
+    std::uint64_t last_eval_flip = 0;  // bbgoated: the flip of the last frame DLAA resolved
     std::uint64_t evaluations = 0, failures = 0;
     std::chrono::steady_clock::time_point last_eval{};
     // The depth targets drawn with depth writes on, least recently written
@@ -515,6 +526,7 @@ bool init_ngx_locked() {
     const std::uint32_t r = g_bridge.init(g.instance, g.phys, g.device, vkGetInstanceProcAddr, vkGetDeviceProcAddr, dll_dir.c_str(),
                                           data_dir.c_str(), &ngx_log);
     g_s.ngx_ok = !ngx_failed(r);
+    g_dlaa_ngx_ok.store(g_s.ngx_ok, std::memory_order_release);  // bbgoated: for reconstruction_running
     host_log("dlaa: NGX init %s (0x%08x)%s", g_s.ngx_ok ? "ok" : "failed", r,
              g_s.ngx_ok ? "" : " - needs an NVIDIA RTX GPU and nvngx_dlss.dll beside bbhost.exe; the game renders unchanged");
 #endif
@@ -537,6 +549,7 @@ void fail_locked(const char* why) {
     host_log("dlaa: %s - off for this session; the game renders unchanged", why);
     release_locked();
     g_s.failed = true;
+    g_dlaa_off.store(true, std::memory_order_release);  // bbgoated: the anti-aliasing hold lets go
 }
 
 // Images and the DLSS feature for a scene of this size and format. False
@@ -998,6 +1011,13 @@ void dlaa_after_draw_locked(const DrawRec& r) {
                 host_log("dlaa: 600 flips of 3D frames without the anchor pipeline; DLAA is not running (BBHOST_DLAA_ANCHOR names another)");
             }
         }
+        // bbgoated: 3D frames for ten seconds since the last DLAA frame (no anchor,
+        // or none with its scene and depth): DLAA is idle, and the game's
+        // anti-aliasing is not held off for it until DLAA resolves frames again.
+        if (dlaa_idle(g_s.last_eval_flip, slot->flip) && !g_dlaa_idle.load(std::memory_order_relaxed)) {
+            g_dlaa_idle.store(true, std::memory_order_relaxed);
+            host_log("dlaa: 600 flips of 3D frames since the last DLAA frame; the game's anti-aliasing is not held off until DLAA runs again");
+        }
     }
     if (g_cb.phase != 2 || !g_dlaa_cb_capturing.load(std::memory_order_relaxed)) {
         cb_tick_locked();
@@ -1229,6 +1249,16 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
     }
     for (State::Depth& d : g_s.depths) d.writes = 0;
     if (g_s.failed) return;
+    // bbgoated: BBHOST_TEST_DLAA_FAIL=<flip> fails DLAA for the session at that flip once
+    // it has resolved frames - the anti-aliasing hold's release is tested with it.
+    static const std::uint64_t test_fail_flip = [] {
+        const char* e = std::getenv("BBHOST_TEST_DLAA_FAIL");
+        return e ? std::strtoull(e, nullptr, 10) : 0ull;
+    }();
+    if (dlaa_test_fail(test_fail_flip, flip, g_s.evaluations)) {
+        fail_locked("BBHOST_TEST_DLAA_FAIL");
+        return;
+    }
     if (!scene) {
         ++g_s.skipped;
         if (g_s.skipped_run++ == 0) {
@@ -1274,6 +1304,7 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
     if (!config_on() && !fg_requested()) return;
     if (ngx_requested() && !init_ngx_locked() && !fsr_selected()) {
         g_s.failed = true;
+        g_dlaa_off.store(true, std::memory_order_release);  // bbgoated: off for the session, as fail_locked says
         return;
     }
     if (!depth_copy_available_locked()) {
@@ -1382,6 +1413,8 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
     memory_barrier(cmd);
     scene->fill_last = false;
     g_s.reset = false;
+    g_s.last_eval_flip = flip;  // bbgoated: DLAA resolved this frame (not idle)
+    g_dlaa_idle.store(false, std::memory_order_relaxed);
     // FSR recommends eight phases times the square of the upscale ratio.
     // Keep native DLSS's existing sequence; FG-only guide capture has no jitter.
     if (config_on() && g_s.jitter_mode.load(std::memory_order_relaxed) == 0) {
@@ -1403,6 +1436,45 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
                  jy, static_cast<unsigned long long>(g_s.jittered_draws));
         g_s.jittered_draws = 0;
     }
+}
+
+}  // namespace gpu
+
+// bbgoated: the game's anti-aliasing held off while a temporal reconstruction runs (host/dlaa_aa.h).
+namespace gpu {
+
+// DLAA's inputs: DLSS super resolution and FSR add theirs to the same predicate in
+// Tasks 5-6 of the Phase 2 plan (docs/bbgoated/pr73-port.md, R7).
+bool reconstruction_running() {
+    return dlaa_active(config_on(), g_dlaa_ngx_ok.load(std::memory_order_acquire), g_dlaa_off.load(std::memory_order_acquire),
+                       g_dlaa_idle.load(std::memory_order_relaxed), g_s.enabled.load(std::memory_order_relaxed));
+}
+
+bool dlaa_running() { return reconstruction_running(); }
+
+// The pump loop's thread, every pass. While a reconstruction runs, the game's own
+// anti-aliasing is held off; it comes back when DLAA is turned off, if the
+// player had it on (host/dlaa_aa.h). Looked at only when DLAA or a setting changed.
+void dlaa_aa_tick() {
+    static bool last_active = false;
+    static std::uint64_t last_serial = 0;
+    const bool active = reconstruction_running();
+    const std::uint64_t serial = host_opt_serial();
+    if (active == last_active && serial == last_serial) return;
+    last_active = active;
+    switch (dlaa_aa_step(active, host_opt_get("anti_alias"), host_opt_held("anti_alias"))) {
+    case kDlaaAaHold:
+        host_opt_hold("anti_alias", false);
+        host_log("dlaa: the game's anti-aliasing is off while DLAA runs (your setting is kept; it is back when DLAA is turned off)");
+        break;
+    case kDlaaAaRelease:
+        host_opt_release("anti_alias");
+        host_log("dlaa: the game's anti-aliasing is back to your setting (DLAA off)");
+        break;
+    case kDlaaAaKeep:
+        break;
+    }
+    last_serial = host_opt_serial();  // our own change is not news
 }
 
 }  // namespace gpu

@@ -28,6 +28,19 @@ int main() {
     check(!dlaa_active(true, true, true, false, true), "failed for the session after NGX started: not running");
     check(!dlaa_active(true, true, false, true, true), "ten seconds of 3D frames without an evaluation: not running");
     check(!dlaa_active(true, true, false, false, false), "switched off with Ctrl+F1: not running");
+
+    // dlaa_idle(last_eval_flip, flip), at a flip with 3D frames
+    check(!dlaa_idle(0, 5000), "no frame resolved yet (starting, or never ran): not idle");
+    check(!dlaa_idle(100, 100), "a frame resolved at this flip: not idle");
+    check(!dlaa_idle(100, 700), "600 flips since the last resolved frame: not idle yet");
+    check(dlaa_idle(100, 701), "more than 600 flips (ten seconds) since the last resolved frame: idle");
+
+    // dlaa_test_fail(fail_flip, flip, evaluations): BBHOST_TEST_DLAA_FAIL=<flip>
+    check(!dlaa_test_fail(0, 5000, 10), "BBHOST_TEST_DLAA_FAIL unset: never");
+    check(!dlaa_test_fail(300, 299, 10), "before its flip: not yet");
+    check(dlaa_test_fail(300, 300, 10), "at its flip, with frames resolved: fails");
+    check(dlaa_test_fail(300, 450, 10), "past its flip (no anchor at the flip itself): fails");
+    check(!dlaa_test_fail(300, 450, 0), "no frame resolved yet: waits, so the hold has something to release");
     if (!fail) std::printf("dlaa_aa_test: ok\n");
     return fail ? 1 : 0;
 }

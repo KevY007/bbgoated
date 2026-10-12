@@ -8,6 +8,8 @@
 // the setting while DLAA runs is their new choice; if it is on, the live
 // value is held off again.
 
+#include <cstdint>
+
 enum DlaaAaAction { kDlaaAaKeep, kDlaaAaHold, kDlaaAaRelease };
 
 // What to do with the game's AA, from whether DLAA runs, whether the game's
@@ -19,3 +21,13 @@ DlaaAaAction dlaa_aa_step(bool dlaa_active, bool game_aa_on, bool held);
 // it is not idle (ten seconds of 3D frames without an evaluation: no anchor,
 // or none with its scene and depth) and Ctrl+F1 has not switched it off.
 bool dlaa_active(bool configured, bool ngx_ok, bool failed, bool idle, bool enabled);
+
+// Whether DLAA is idle at a flip with 3D frames: more than 600 flips (ten
+// seconds) since last_eval_flip, the flip of the last frame it resolved. Never
+// before its first, so a DLAA that is still starting is not idle.
+bool dlaa_idle(std::uint64_t last_eval_flip, std::uint64_t flip);
+
+// BBHOST_TEST_DLAA_FAIL=<flip> (fail_flip, 0 when unset): DLAA fails for the
+// session at that flip, or the first anchor after it, once it has resolved
+// frames - so the hold has something to give back when it does.
+bool dlaa_test_fail(std::uint64_t fail_flip, std::uint64_t flip, std::uint64_t evaluations);

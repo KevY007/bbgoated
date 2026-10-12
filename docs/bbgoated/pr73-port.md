@@ -75,7 +75,8 @@ retirement) and 539d45f (docs).
   `BBHOST_DLAA_PRESET` are PR #73's own (`config_preset()`, `dlaa.cpp:98`); the plan's F10
   `dlss_preset` row (Task 5) is read only when neither names a preset.
 - **R7 - the game's anti-aliasing is held off whenever a temporal reconstruction runs: DLAA, DLSS
-  super resolution or FSR.** Tasks 5 and 6 widen `dlaa_running()` (E9): its "provider started" input
+  super resolution or FSR.** Tasks 5 and 6 widen `reconstruction_running()` (E9; Task 4 named the
+  predicate so, `dlaa_running()` is its older name): its "provider started" input
   is NGX for DLSS and the FSR provider for FSR (`g_dlaa_ngx_ok` alone is false with FSR, which loads
   no bridge), a failed SR or FSR (`g_sr_render_failed` with FSR selected; DLSS falls back to native
   DLAA) counts as failed, and the idle clock (E8) is fed where a frame was actually reconstructed: at
@@ -242,20 +243,24 @@ are PR #73's `dlaa.cpp` at 539d45f, before the plan's edit 1 removes its first l
 - E4, `State` (after `bool anchor_missing_said = false;`, line 187):
   `std::uint64_t last_eval_flip = 0;`.
 - E5, `fail_locked` (after `g_s.failed = true;`, line 540): `g_dlaa_off.store(true, ...)`.
-  PR #73's other `g_s.failed = true;` (line 1270, NGX init failed) needs none: NGX is not up then.
+  PR #73's other `g_s.failed = true;` (line 1270, NGX init failed) gets the same store in Task 4:
+  NGX is not up then, so nothing changes, but every "off for the session" is one signal.
 - E6, `dlaa_after_draw_locked` (after the "600 flips of 3D frames without the anchor pipeline"
   block, which ends at line 994, inside the depth-write branch): 600 flips of 3D frames since
-  `last_eval_flip` set `g_dlaa_idle` and log it once.
+  `last_eval_flip` set `g_dlaa_idle` and log it once (the rule is `dlaa_idle()`, host/dlaa_aa.h,
+  tested since Task 4).
 - E7, `dlaa_anchor_locked` (after `if (g_s.failed) return;`, line 1225): the
   `BBHOST_TEST_DLAA_FAIL=<flip>` block, `fail_locked("BBHOST_TEST_DLAA_FAIL")` once DLAA has
-  resolved frames.
+  resolved frames (`dlaa_test_fail()`, host/dlaa_aa.h).
 - E8, `dlaa_anchor_locked` (after `g_s.reset = false;`, line 1378): `g_s.last_eval_flip = flip;`
   and `g_dlaa_idle.store(false, ...)`. In (a2) only DLAA reaches this line; R7 moves the
   super-resolution case (Tasks 5, 6).
 - E9, after the file's closing `}  // namespace gpu` (line 1402): a marked `namespace gpu` block
-  with `dlaa_running()` (`dlaa_active(config_on(), g_dlaa_ngx_ok, g_dlaa_off, g_dlaa_idle,
-  g_s.enabled)`) and `dlaa_aa_tick()`, as on bbgoated/main (414027f's versions).
-- E10, dlaa.h (after `namespace gpu {`): the `dlaa_running()` and `dlaa_aa_tick()` declarations.
+  with `reconstruction_running()` (`dlaa_active(config_on(), g_dlaa_ngx_ok, g_dlaa_off,
+  g_dlaa_idle, g_s.enabled)`; R7), `dlaa_running()` calling it, and `dlaa_aa_tick()`, as on
+  bbgoated/main (414027f's versions).
+- E10, dlaa.h (after `namespace gpu {`): the `reconstruction_running()`, `dlaa_running()` and
+  `dlaa_aa_tick()` declarations.
 - main.cpp: `git apply --3way <tick patch>` (step 1's) puts the tick back; it applies beside
   PR #73's h1.
 - Not re-applied: 6664c3f's `VK_EXT_buffer_device_address` strip (PR #73 strips it itself;
