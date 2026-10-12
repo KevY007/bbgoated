@@ -45,6 +45,7 @@
 
 #include "core/write_watch.h"
 #include "host/gpu_internal.h"
+#include "host/perf/vk/shadow_policy.h"
 #include "host/stage_share.h"
 #include "log.h"
 
@@ -227,6 +228,8 @@ bool phys_of(std::uint64_t va, std::uint64_t bytes, std::uint32_t& chunk, std::u
 // in between pay no budget reading.
 bool mirror_room(std::uint64_t bytes) {
     if (g_mirror_bytes + bytes > g_mirror_cap) return false;
+    // bbgoated (host/perf/vk/shadow_policy.cpp, BBHOST_BBG_SHADOW_FLOOR_MB): up to the floor the live share does not ask.
+    if (shadow_floor_bytes() && g_mirror_bytes + bytes <= shadow_floor_bytes()) return true;
     if (!g_live) return true;
     const std::uint64_t now = now_ms();
     if (now < g_room_retry_ms) return false;
@@ -432,6 +435,10 @@ void go_dynamic(Mirror& m, std::uint32_t p, std::uint64_t va, const char* why) {
     if (g_dynamic.fetch_add(1, std::memory_order_relaxed) < 8) {
         host_log("buffer shadow: the page at 0x%llx %s; bound from host memory from now on", static_cast<unsigned long long>(va), why);
     }
+    // bbgoated (host/perf/vk/shadow_policy.cpp, BBHOST_BBG_SHADOW_RETRY_S): when, and whether for being rewritten.
+    if (shadow_policy_any()) {
+        shadow_policy_went_dynamic_locked(static_cast<std::uint32_t>(&m - g_mirrors), p, std::strcmp(why, "keeps being rewritten") == 0, now_ms());
+    }
 }
 
 // The per-recording bits start empty in each recording: whichever of a
@@ -457,9 +464,16 @@ void shadow_locate_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
     if (!buffer_shadow_on() || !bytes || !loc.buffer) return;
     std::uint32_t chunk = 0;
     std::uint64_t off = 0, map_lo = 0, map_hi = 0;
-    if (!phys_of(va, bytes, chunk, off, &map_lo, &map_hi)) return;
+    if (!phys_of(va, bytes, chunk, off, &map_lo, &map_hi)) {
+        // bbgoated (host/perf/vk/shadow_policy.cpp, BBHOST_BBG_SHADOW_AUDIT): each return to host memory is counted, by why.
+        if (shadow_audit_on()) shadow_audit_host_locked(va, bytes, kAuditNotMirrorable);
+        return;
+    }
     Mirror* m = mirror_for(chunk);
-    if (!m) return;
+    if (!m) {
+        if (shadow_audit_on()) shadow_audit_host_locked(va, bytes, kAuditNoMirror);  // bbgoated (BBHOST_BBG_SHADOW_AUDIT)
+        return;
+    }
     const std::uint64_t stamp = g.record_serial + 1;
     const std::uint32_t p0 = static_cast<std::uint32_t>(off >> kPageShift);
     const std::uint32_t p1 = static_cast<std::uint32_t>((off + bytes - 1) >> kPageShift);
@@ -475,10 +489,28 @@ void shadow_locate_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
         loc.avail = bytes;
         return;
     }
+    // bbgoated (host/perf/vk/shadow_policy.cpp, BBHOST_BBG_SHADOW_RETRY_S): pages sent away for
+    // being rewritten whose time is up are copied again below.
+    if (shadow_retry_ms() && any_set(m->dyn, p0, p1)) {
+        const std::uint64_t t = now_ms();
+        for (std::uint32_t p = p0; p <= p1; ++p) {
+            if (!(m->dyn[p >> 6] & (1ull << (p & 63))) || !shadow_policy_retry_due_locked(chunk, p, t)) continue;
+            Page& pg = m->pages[p];
+            pg.dynamic = false;
+            pg.valid = false;
+            pg.window_uploads = 0;
+            pg.window_ms = t;
+            m->dyn[p >> 6] &= ~(1ull << (p & 63));
+            shadow_policy_retried_locked(chunk, p);
+        }
+    }
     // A page bound from host memory for good, or one a GPU write in this
     // recording left uncopied (a copy now would run before that write): the
     // walk below would stop at it, having looked at every page before it.
     if (any_set(m->dyn, p0, p1) || any_set(m->gpu, p0, p1)) {
+        if (shadow_audit_on()) {  // bbgoated (BBHOST_BBG_SHADOW_AUDIT)
+            shadow_audit_host_locked(va, bytes, any_set(m->dyn, p0, p1) ? kAuditDynamic : kAuditGpuWritten);
+        }
         bump(g_imports);
         return;
     }
@@ -492,6 +524,7 @@ void shadow_locate_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
     if (g_live && m->sparse && (m->blocks.empty() || m->block_pages_used == kBlockPages) && !all_ok(m->resident, p0, p1) &&
         now_ms() < g_room_retry_ms) {
         ++g_room_skips;
+        if (shadow_audit_on()) shadow_audit_host_locked(va, bytes, kAuditNoRoom);  // bbgoated (BBHOST_BBG_SHADOW_AUDIT)
         bump(g_imports);
         return;
     }
@@ -542,13 +575,17 @@ void shadow_locate_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
                 continue;
             }
             const std::uint32_t uploads = t - pg.window_ms >= kUploadWindowMs ? 0 : pg.window_uploads;
-            if (uploads + 1 > kMaxUploads) break;  // the loop sends it to host memory and stops there
+            // bbgoated (host/perf/vk/shadow_policy.cpp, BBHOST_BBG_SHADOW_HOT): under another hot rule the walk
+            // may arm a page the loop then sends away, which is harmless - dynamic pages are never checked.
+            const bool counted = !shadow_policy_any() || shadow_hot_rule() == kShadowHotUpstream;
+            if (counted && uploads + 1 > kMaxUploads) break;  // the loop sends it to host memory and stops there
         }
         arm_run(run, p);
     }
     // Pages to copy, as runs, from the import that holds them all.
     const Chunk* source = dmem_import(chunk, static_cast<std::uint64_t>(p0) << kPageShift, static_cast<std::uint64_t>(p1 - p0 + 1) << kPageShift);
     if (!source) {
+        if (shadow_audit_on()) shadow_audit_host_locked(va, bytes, kAuditNoImport);  // bbgoated (BBHOST_BBG_SHADOW_AUDIT)
         bump(g_imports);
         return;
     }
@@ -564,6 +601,7 @@ void shadow_locate_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
         const std::uint64_t page_va = va - (off - (static_cast<std::uint64_t>(p) << kPageShift));
         if (pg.dynamic) {
             flush();
+            if (shadow_audit_on()) shadow_audit_host_locked(va, bytes, kAuditDynamic);  // bbgoated (BBHOST_BBG_SHADOW_AUDIT)
             bump(g_imports);
             return;
         }
@@ -571,6 +609,7 @@ void shadow_locate_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
         // that write. In a later recording the copy is ordered after it.
         if (!pg.valid && pg.gpu_written == stamp) {
             flush();
+            if (shadow_audit_on()) shadow_audit_host_locked(va, bytes, kAuditGpuWritten);  // bbgoated (BBHOST_BBG_SHADOW_AUDIT)
             bump(g_imports);
             return;
         }
@@ -592,9 +631,18 @@ void shadow_locate_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
             pg.window_ms = t;
             pg.window_uploads = 0;
         }
-        if (++pg.window_uploads > kMaxUploads) {
+        bool rewritten;
+        if (!shadow_policy_any()) {
+            rewritten = ++pg.window_uploads > kMaxUploads;
+        } else {  // bbgoated (host/perf/vk/shadow_policy.cpp, BBHOST_BBG_SHADOW_HOT / _PINGPONG)
+            const bool policy = shadow_policy_copy_locked(chunk, p, t);
+            const bool upstream_rule = shadow_hot_rule() == kShadowHotUpstream && ++pg.window_uploads > kMaxUploads;
+            rewritten = policy || upstream_rule;
+        }
+        if (rewritten) {
             go_dynamic(*m, p, page_va, "keeps being rewritten");
             flush();
+            if (shadow_audit_on()) shadow_audit_host_locked(va, bytes, kAuditRewritten);  // bbgoated (BBHOST_BBG_SHADOW_AUDIT)
             bump(g_imports);
             return;
         }
@@ -604,6 +652,7 @@ void shadow_locate_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
         if (!(prearmed[p - p0] & 1) && !hle_kernel_write_watch(lo, hi - lo, pg.watch)) {
             go_dynamic(*m, p, page_va, "cannot be write-watched");
             flush();
+            if (shadow_audit_on()) shadow_audit_host_locked(va, bytes, kAuditUnwatchable);  // bbgoated (BBHOST_BBG_SHADOW_AUDIT)
             bump(g_imports);
             return;
         }
@@ -612,6 +661,7 @@ void shadow_locate_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
             pg.watch = WriteWatch{};
             pg.alias_watch = WriteWatch{};
             pg.alias_va = 0;
+            if (shadow_audit_on()) shadow_audit_host_locked(va, bytes, kAuditNoMirror);  // bbgoated (BBHOST_BBG_SHADOW_AUDIT)
             return;
         }
         pg.va = lo;
@@ -647,6 +697,7 @@ void shadow_locate_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
                     pg.alias_va = 0;
                     ++g_room_refusals;
                     flush();
+                    if (shadow_audit_on()) shadow_audit_host_locked(va, bytes, kAuditNoRoom);  // bbgoated (BBHOST_BBG_SHADOW_AUDIT)
                     bump(g_imports);
                     return;
                 }
@@ -654,6 +705,7 @@ void shadow_locate_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
                     go_dynamic(*m, p, page_va, !room ? "has no room in the mirrors' share of video memory"
                                                      : "has no device memory for its mirror page");
                     flush();
+                    if (shadow_audit_on()) shadow_audit_host_locked(va, bytes, kAuditNoRoom);  // bbgoated (BBHOST_BBG_SHADOW_AUDIT)
                     bump(g_imports);
                     return;
                 }
@@ -818,6 +870,8 @@ void shadow_written_locked(std::uint64_t va, std::uint64_t bytes, bool by_gpu) {
             pg.gpu_written = stamp;
             m.gpu[p >> 6] |= 1ull << (p & 63);
             ++gpu_pages;
+            // bbgoated (host/perf/vk/shadow_policy.cpp, BBHOST_BBG_SHADOW_PINGPONG): the next copy is a bounce.
+            if (shadow_policy_any()) shadow_policy_gpu_wrote_locked(chunk, static_cast<std::uint32_t>(p));
         }
     }
     if (gpu_pages) g_gpu_written.fetch_add(gpu_pages, std::memory_order_relaxed);
