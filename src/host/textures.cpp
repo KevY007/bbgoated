@@ -2,6 +2,7 @@
 // stage's user data become Vulkan images (untiled on upload) and samplers.
 // Render targets sampled as textures alias the render target image.
 #include "host/gpu_internal.h"
+#include "host/perf/vk/fold_clears.h"
 
 #if !defined(_WIN32)
 #include <dlfcn.h>
@@ -1529,6 +1530,8 @@ std::atomic<std::uint64_t> g_rt_unlisted_reads{0};
 
 VkImageView render_target_view(RtImage& r, const std::uint32_t* tsharp, std::uint32_t first_layer, std::uint32_t layer_count,
                                bool arrayed) {
+    // bbgoated (host/perf/vk/fold_clears.cpp, BBHOST_BBG_FOLD_CLEARS): a held clear lands before the target is read.
+    if (g_fold_pending) fold_record_image_locked(r.image);
     first_layer = std::min(first_layer, r.layers - 1);
     layer_count = std::max(1u, std::min(layer_count, r.layers - first_layer));
     VkFormat format = r.format;
@@ -2029,6 +2032,7 @@ void record_region_copy(VkCommandBuffer cmd, VkImage src, VkImage dst, std::uint
 // at every bind, and the T#'s view of that (rt_region_view; a format the
 // target's view list leaves out, render_target_view).
 VkImageView rt_copied_view(RtImage& rt, const std::uint32_t* w, std::uint32_t width, std::uint32_t height) {
+    if (g_fold_pending) fold_record_image_locked(rt.image);  // bbgoated: the region copy goes through the draw packet, not rec()
     const auto key = std::make_tuple(rt.base, width, height, static_cast<int>(rt.format));
     auto it = g_rt_regions.find(key);
     if (it != g_rt_regions.end() && it->second.source != rt.image) {

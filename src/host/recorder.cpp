@@ -45,6 +45,7 @@
 // to bb-submit (R4).
 
 #include "host/gpu_internal.h"
+#include "host/perf/vk/fold_clears.h"
 #include "host/stream_ops.h"
 
 #include <algorithm>
@@ -867,7 +868,10 @@ StreamTestCounts stream_test_counts() {
     return c;
 }
 
-VkCommandBuffer g_cmd() { return in_place(__builtin_return_address(0)); }
+VkCommandBuffer g_cmd() {
+    if (g_fold_pending) fold_record_all_locked();  // bbgoated (host/perf/vk/fold_clears.cpp, BBHOST_BBG_FOLD_CLEARS)
+    return in_place(__builtin_return_address(0));
+}
 
 std::string recorder_report() {
     if (!g_blocks) return std::string();
@@ -958,6 +962,7 @@ std::string recorder_report() {
 #define REC_SITE __builtin_return_address(0)
 
 Rec& rec() {
+    if (g_fold_pending) fold_record_all_locked();  // bbgoated (host/perf/vk/fold_clears.cpp): held clears land before what is recorded next
     static Rec r;
     return r;
 }

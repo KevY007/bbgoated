@@ -10,6 +10,7 @@
 #include "host/dlaa.h"
 #include "host/gpu_internal.h"
 #include "host/perf/vk/async_skip.h"
+#include "host/perf/vk/fold_clears.h"
 #include "host/shader_patch.h"
 #include "host/tess_lds.h"
 #include "host/translation_cache.h"
@@ -17,6 +18,7 @@
 #include "host/draw_capture.h"
 #include "host/perf/bbg_perf.h"
 #include "host/perf/census.h"
+#include "host/perf/core/fold_core.h"
 #include "host/perf/core/lazy_barriers_core.h"
 #include "gcn/container.h"
 #include "gcn/lift.h"
@@ -1135,6 +1137,7 @@ std::uint64_t g_max_rt_bytes = 0;
 std::unordered_set<std::uint64_t> g_htile_bases;
 
 void destroy_rt_image(RtImage& r) {
+    if (g_fold_pending) fold_forget_image_locked(r.image);  // bbgoated (host/perf/vk/fold_clears.cpp): a held clear goes with its image
     invalidate_rt_views(r.base);
     defer_destroy_view(r.view);
     for (auto& [layer, view] : r.layer_views) defer_destroy_view(view);
@@ -2159,6 +2162,18 @@ std::uint64_t pipeline_key(const DrawState& s, std::uint64_t vs_hash, std::uint6
 std::unordered_map<std::uint64_t, gcn::TranslateResult> g_paths_cache;  // never erased: references stay valid
 
 }  // namespace
+
+// bbgoated (host/perf/vk/fold_clears.cpp, BBHOST_BBG_FOLD_CLEARS): the held
+// clears a pass's load ops do (begin_pass; fold_take_for_pass_locked is below,
+// beside clear_image_locked).
+struct FoldTaken {
+    bool color[8] = {};
+    VkClearValue color_value[8] = {};
+    bool depth = false;
+    VkImageAspectFlags depth_aspects = 0;
+    VkClearValue depth_value{};
+};
+bool fold_take_for_pass_locked(const DrawState& s, std::uint64_t key, FoldTaken& out);
 
 // The per-shader compiles translate each program for its paths as paths_for
 // does, with the registers its binary gives, when GX creates it: a draw of a
@@ -6556,6 +6571,7 @@ void pay_pass_barrier_locked() {
 
 // A pass ended for the next draw's pass: its barrier owed (lazy pass barriers).
 void end_pass_for_draw_locked() {
+    if (g_fold_pending) fold_record_all_locked();  // bbgoated (host/perf/vk/fold_clears.cpp): as render_end_pass_locked; it may end the pass
     if (!g_pass.active) return;
     if (!lazy_barriers()) {
         render_end_pass_locked();
@@ -6571,6 +6587,8 @@ void end_pass_for_draw_locked() {
 // `hazard`: the draw samples a target written since the last barrier (lazy
 // pass barriers), so the barrier is paid before it, inside a pass or not.
 void begin_pass(const DrawState& s, std::uint64_t key, bool hazard = false) {
+    FoldTaken fold;  // bbgoated (host/perf/vk/fold_clears.cpp): held clears this pass's load ops do
+    if (g_fold_pending) hazard = fold_take_for_pass_locked(s, key, fold) || hazard;
     if (g_pass.active && g_pass.key == key && !hazard) return;
     transfer_flush_locked();
     if (hazard && g_pass.active && g_pass.key == key) g_barriers_mid_pass.fetch_add(1, std::memory_order_relaxed);
@@ -6607,6 +6625,10 @@ void begin_pass(const DrawState& s, std::uint64_t key, bool hazard = false) {
         a.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        if (fold.color[t]) {  // bbgoated: the held clear, by the load op
+            a.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            a.clearValue = fold.color_value[t];
+        }
         colors.push_back(a);
         if (!extent.width || s.color[t]->width < extent.width) extent.width = s.color[t]->width;
         if (!extent.height || s.color[t]->height < extent.height) extent.height = s.color[t]->height;
@@ -6620,6 +6642,16 @@ void begin_pass(const DrawState& s, std::uint64_t key, bool hazard = false) {
         depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         stencil = depth;
+        if (fold.depth) {  // bbgoated: the held depth/stencil clear, by the load ops
+            if (fold.depth_aspects & VK_IMAGE_ASPECT_DEPTH_BIT) {
+                depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                depth.clearValue = fold.depth_value;
+            }
+            if (fold.depth_aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
+                stencil.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                stencil.clearValue = fold.depth_value;
+            }
+        }
         if (!extent.width || s.depth->width < extent.width) extent.width = s.depth->width;
         if (!extent.height || s.depth->height < extent.height) extent.height = s.depth->height;
     }
@@ -7157,6 +7189,9 @@ DrawCmds* draw_packet_early_locked() {
 }
 
 void render_end_pass_locked() {
+    // bbgoated (host/perf/vk/fold_clears.cpp, BBHOST_BBG_FOLD_CLEARS): held clears are recorded before a pass ends, not from
+    // the rec() of its end, by which time g_pass says it is over and a clear would land inside it.
+    if (g_fold_pending) fold_record_all_locked();
     if (g_pass.active) {
         bbg::census_pass_end_locked(__builtin_return_address(0));  // bbgoated (host/perf/census.cpp, BBHOST_BBG_PASS_BREAKS)
         g_pass.active = false;
@@ -7328,10 +7363,133 @@ std::size_t format_bytes_per_pixel(VkFormat format) {
 
 std::size_t rt_bytes_per_pixel(const RtImage& r) { return format_bytes_per_pixel(r.format); }
 
+// bbgoated (host/perf/vk/fold_clears.cpp, BBHOST_BBG_FOLD_CLEARS): a clear of a
+// whole target is held, and the target's next pass does it with its load op;
+// anything else that comes first records it as before.
+void clear_image_record_locked(RtImage& r, const float rgba[4], std::uint32_t first_layer, std::uint32_t layer_count);  // below
+
+// A held clear, recorded as it was before. Its image is still the target's: a
+// target destroyed meanwhile took its held clear with it (destroy_rt_image).
+void fold_record_as_before(const FoldClear& c) {
+    RtImage r;  // what the clears read of their target: its image, format and kind, and its base for their lines
+    r.image = c.image;
+    r.base = c.base;
+    r.format = c.format;
+    r.depth = c.depth_target;
+    r.initialised = true;  // only an initialised target's clear is held
+    if (c.at_draw) clear_depth(r, c.depth, c.stencil, c.dval, c.sval);
+    else clear_image_record_locked(r, c.rgba, c.first, c.count);
+}
+
+// clear_image_locked's clear, held: the whole of an initialised single-layer
+// target that no open pass draws into. Held only while recording, so the
+// submission records it before it ends (fold_record_all_locked).
+bool fold_fill_clear_locked(RtImage& r, const float rgba[4], std::uint32_t first_layer, std::uint32_t layer_count) {
+    if (g.profile || !r.initialised || r.layers != 1 || first_layer != 0 || layer_count == 0 || !std::isfinite(rgba[0])) return false;
+    for (int t = 0; g_pass.active && t < g_pass.ntargets; ++t) {
+        if (g_pass.targets[t] == r.base) return false;  // drawn into by the open pass: cleared as before
+    }
+    begin_recording_locked();
+    FoldClear c;
+    c.image = r.image;
+    c.base = r.base;
+    c.format = r.format;
+    c.depth_target = r.depth;
+    c.aspects = aspect_of(r);
+    std::memcpy(c.rgba, rgba, sizeof(c.rgba));
+    c.first = first_layer;
+    c.count = layer_count;
+    if (r.depth) {
+        c.value.depthStencil = {rgba[0], 0};
+    } else {
+        const bool bgra = r.format == VK_FORMAT_B8G8R8A8_UNORM || r.format == VK_FORMAT_B8G8R8A8_SRGB;
+        c.value.color.float32[0] = bgra ? rgba[2] : rgba[0];
+        c.value.color.float32[1] = rgba[1];
+        c.value.color.float32[2] = bgra ? rgba[0] : rgba[2];
+        c.value.color.float32[3] = rgba[3];
+    }
+    fold_hold_locked(c);
+    return true;
+}
+
+// clear_depth's clear at a draw, held for that draw's pass (layer 0 of an
+// initialised single-layer target). Both callers have begun recording.
+bool fold_draw_depth_clear_locked(RtImage& r, std::uint32_t layer, bool depth, bool stencil, float dval, std::uint32_t sval) {
+    if (fold_clears_mode() < 1 || g.profile || !r.initialised || r.layers != 1 || layer != 0) return false;
+    VkImageAspectFlags aspects = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : 0;
+    if (stencil && r.format != VK_FORMAT_D32_SFLOAT && r.format != VK_FORMAT_D16_UNORM) aspects |= VK_IMAGE_ASPECT_STENCIL_BIT;
+    if (!aspects) return false;  // clear_depth only ends the pass then: kept as it is
+    FoldClear c;
+    c.image = r.image;
+    c.base = r.base;
+    c.format = r.format;
+    c.depth_target = r.depth;
+    c.at_draw = true;
+    c.aspects = aspects;
+    c.value.depthStencil = {dval, sval};
+    c.depth = depth;
+    c.stencil = stencil;
+    c.dval = dval;
+    c.sval = sval;
+    fold_hold_locked(c);
+    return true;
+}
+
+// For each attachment with a held clear: taken for its load op when the pass
+// covers the whole image at layer 0, else recorded as before, now. True when a
+// clear was taken for the pass already open: it must begin again.
+bool fold_take_for_pass_locked(const DrawState& s, std::uint64_t key, FoldTaken& out) {
+    std::uint32_t w = 0, h = 0;  // the render area begin_pass will use
+    for (int t = 0; t < 8; ++t) {
+        if (!s.color[t]) continue;
+        if (!w || s.color[t]->width < w) w = s.color[t]->width;
+        if (!h || s.color[t]->height < h) h = s.color[t]->height;
+    }
+    if (s.depth) {
+        if (!w || s.depth->width < w) w = s.depth->width;
+        if (!h || s.depth->height < h) h = s.depth->height;
+    }
+    bool took = false;
+    for (int t = 0; t < 8 && g_fold_pending; ++t) {
+        const RtImage* r = s.color[t];
+        FoldClear c;
+        if (!r || !fold_take_locked(r->image, c)) continue;
+        if (!c.at_draw && !r->depth && bbg::fold_by_load_op(s.color_layer[t], r->width, r->height, w, h)) {
+            out.color[t] = true;
+            out.color_value[t] = c.value;
+            took = true;
+            fold_note_done_locked(false);
+            g_clears.fetch_add(1);
+        } else {
+            fold_record_locked(c);
+        }
+    }
+    FoldClear c;
+    if (s.depth && g_fold_pending && fold_take_locked(s.depth->image, c)) {
+        if (bbg::fold_by_load_op(s.depth_layer, s.depth->width, s.depth->height, w, h)) {
+            out.depth = true;
+            out.depth_aspects = c.aspects;
+            out.depth_value = c.value;
+            took = true;
+            fold_note_done_locked(true);
+            g_clears.fetch_add(1);
+        } else {
+            fold_record_locked(c);
+        }
+    }
+    return took && g_pass.active && g_pass.key == key;
+}
+
 // Recognised fill shader: the whole image is this constant. The V# byte count
 // is the tiled allocation, often a few rows larger (or a 1024² slice) than
 // width*height*bpp of the unpadded image, so there is no size check here.
 void clear_image_locked(RtImage& r, const float rgba[4], std::uint32_t first_layer = 0, std::uint32_t layer_count = ~0u) {
+    // bbgoated (host/perf/vk/fold_clears.cpp, BBHOST_BBG_FOLD_CLEARS=all): held for the target's next pass.
+    if (fold_clears_mode() >= 2 && fold_fill_clear_locked(r, rgba, first_layer, layer_count)) return;
+    clear_image_record_locked(r, rgba, first_layer, layer_count);
+}
+
+void clear_image_record_locked(RtImage& r, const float rgba[4], std::uint32_t first_layer, std::uint32_t layer_count) {
     if (r.base == g_order_target && hle_video_flip_count() >= 2000 && g_order_logs.load() < 120) {
         g_order_logs.fetch_add(1);
         host_log("order: CLEAR 0x%llx rgba=%.3f %.3f %.3f %.3f", static_cast<unsigned long long>(r.base), rgba[0], rgba[1], rgba[2],
@@ -8570,6 +8728,7 @@ void prefetch_stage_images(const gcn::TranslateResult& meta, const std::uint32_t
             }
         }
         if (im.resolved) {
+            if (g_fold_pending) fold_record_sampled_locked(im.w);  // bbgoated (host/perf/vk/fold_clears.cpp): the memos skip render_target_view
             bool ok;
             const GxBindingPlan* bp = plan && k < plan->images.size() ? &plan->images[k] : nullptr;
             const std::uint32_t id = bp && bp->source == GxBindingPlan::kTex && ((gx->obj_tex_set >> bp->slot) & 1) ? gx->obj_tex_id[bp->slot] : 0;
@@ -12659,7 +12818,8 @@ static bool draw_impl(const GpuDraw& d) {
                     begin_recording_locked();
                     float dval;
                     std::memcpy(&dval, &depth_clear, 4);
-                    clear_depth(*s.depth, true, true, dval, stencil_clear & 0xff);
+                    if (!fold_draw_depth_clear_locked(*s.depth, s.depth_layer, true, true, dval, stencil_clear & 0xff))  // bbgoated (BBHOST_BBG_FOLD_CLEARS)
+                        clear_depth(*s.depth, true, true, dval, stencil_clear & 0xff);
                 }
             }
         }
@@ -12680,7 +12840,9 @@ static bool draw_impl(const GpuDraw& d) {
         begin_recording_locked();
         float dval;
         std::memcpy(&dval, &s.depth_clear, 4);
-        clear_depth(*s.depth, (s.render_control & 1) != 0, (s.render_control & 2) != 0, dval, s.stencil_clear & 0xff);
+        if (!fold_draw_depth_clear_locked(*s.depth, s.depth_layer, (s.render_control & 1) != 0, (s.render_control & 2) != 0, dval,
+                                          s.stencil_clear & 0xff))  // bbgoated (host/perf/vk/fold_clears.cpp, BBHOST_BBG_FOLD_CLEARS)
+            clear_depth(*s.depth, (s.render_control & 1) != 0, (s.render_control & 2) != 0, dval, s.stencil_clear & 0xff);
     }
     if (!any_color && !s.depth) {
         g_untraced_draws.fetch_add(1);
