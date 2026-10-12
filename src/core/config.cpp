@@ -327,44 +327,79 @@ bool bbhost_running() {
 #endif
 }
 
+// Whether a saves folder holds a save: any file in it. The game makes the
+// folder (sceSaveDataInitialize) at a start that saves nothing, and a folder
+// that cannot be read counts as one with saves - it is never copied into.
+bool has_saves(const std::filesystem::path& dir) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const bool there = fs::exists(dir, ec);
+    if (ec) return true;
+    if (!there) return false;
+    for (fs::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code fec;
+        if (it->is_regular_file(fec) || fec) return true;
+    }
+    return static_cast<bool>(ec);
+}
+
+// One item of bbhost's data folder into bbgoated's, never over a file there;
+// false when it could not all come over (an item bbhost does not have is fine).
+bool copy_item(const std::filesystem::path& from, const std::filesystem::path& to, const char* sub) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path src = from / sub;
+    const bool there = fs::exists(src, ec);
+    if (ec) return false;
+    if (!there) return true;
+    fs::copy(src, to / sub, fs::copy_options::recursive | fs::copy_options::skip_existing, ec);
+    host_log("bbgoated: %s %s from %s into %s (the source is only read)", ec ? "could not copy" : "copied", sub,
+             src.generic_string().c_str(), to.generic_string().c_str());
+    return !ec;
+}
+
 // bbgoated's first start: bbhost's saves (and their backups), its shader
 // caches and downloaded assets (data/bbhost: no compile hitches on the first
 // run) and its trophies, copied. The source folder is only read; a marker
-// written once everything came over means it never happens again. Saves are
-// never copied into a folder that has some already - the player's bbgoated
-// progress - and no file there is ever replaced. A copy cut short is
-// finished at the next start (existing files are skipped).
+// written once everything came over means it never happens again.
+// - Saves and backups go only into a folder with no save in it yet, or to
+//   finish their own copy cut short (saves.copying). The guard file goes as
+//   soon as they are in, whatever happens to the rest: a later start never
+//   copies bbhost's saves or backups into the progress made since.
+// - Caches, assets and trophies never replace a file; a start after one could
+//   not come over tries again.
+// - Nothing happens while bbhost.exe runs, or while bbhost's data folder is not
+//   there (a drive not mounted yet): a later start copies.
 void seed_saves(const std::string& from, const std::string& to) {
     namespace fs = std::filesystem;
     std::error_code ec;
-    const fs::path marker = fs::path(to) / "bbgoated-saves-from-bbhost.txt";
+    const fs::path src(from), dst(to);
+    const fs::path marker = dst / "bbgoated-saves-from-bbhost.txt";
+    const fs::path guard = dst / "saves.copying";
     if (from.empty() || from == to || fs::exists(marker, ec)) return;
+    if (!fs::is_directory(src, ec)) {
+        host_log("bbgoated: bbhost's data folder %s is not there - its saves are copied at a start when it is", from.c_str());
+        return;
+    }
     if (bbhost_running()) {
         host_log("bbgoated: bbhost is running - its saves are copied at a start when it is not");
         return;
     }
-    const bool saves = !fs::exists(fs::path(to) / "saves", ec) || fs::exists(fs::path(to) / "saves.copying", ec);
-    if (saves) std::ofstream(fs::path(to) / "saves.copying") << from << "\n";
     bool ok = true;
-    for (const char* sub : {"saves", "save-backups", "bbhost", "trophies.txt"}) {
-        const bool progress = std::strcmp(sub, "saves") == 0 || std::strcmp(sub, "save-backups") == 0;
-        if (progress && !saves) continue;
-        const fs::path src = fs::path(from) / sub;
-        if (!fs::exists(src, ec)) continue;
-        ec.clear();
-        fs::copy(src, fs::path(to) / sub, fs::copy_options::recursive | fs::copy_options::skip_existing, ec);
-        if (ec) ok = false;
-        host_log("bbgoated: %s %s from %s into %s (the source is only read)", ec ? "could not copy" : "copied", sub,
-                 src.generic_string().c_str(), to.c_str());
+    if (!has_saves(dst / "saves") || fs::exists(guard, ec)) {
+        std::ofstream(guard) << from << "\n";
+        const bool saves_ok = copy_item(src, dst, "saves") && copy_item(src, dst, "save-backups");
+        if (saves_ok) fs::remove(guard, ec);
+        ok = saves_ok;
     }
+    for (const char* sub : {"bbhost", "trophies.txt"}) ok = copy_item(src, dst, sub) && ok;
     if (!ok) return;
     std::ofstream(marker) << "bbhost's saves were copied from " << from << "\n";
-    fs::remove(fs::path(to) / "saves.copying", ec);
 }
 
 // bbgoated's first start: bbhost's per-user config gives bbgoated.toml its
 // first contents - the game's paths, the server, the key bindings - and its
-// official plugins come over with their signatures. bbhost's files are only
+// plugins folder comes over, signatures included. bbhost's files are only
 // read. [paths] data and tmp stay behind: bbgoated's saves live in a data
 // folder of its own.
 void import_from_bbhost(const std::string& to) {
@@ -374,13 +409,16 @@ void import_from_bbhost(const std::string& to) {
     std::ifstream in(from, std::ios::binary);
     if (!in) return;
     std::ofstream out(to, std::ios::binary);
-    std::string section;
+    std::string section;  // as parse_file reads it
     for (std::string line; std::getline(in, line);) {
-        std::string t = line;
-        while (!t.empty() && (t.back() == '\r' || t.back() == ' ')) t.pop_back();
-        const std::size_t a = t.find_first_not_of(" \t");
-        if (a != std::string::npos && t[a] == '[') section = t.substr(a);
-        if (section == "[paths]" && a != std::string::npos && (t.compare(a, 4, "data") == 0 || t.compare(a, 3, "tmp") == 0)) continue;
+        const std::string t = trim(line);
+        if (!t.empty() && t.front() == '[' && t.back() == ']') {
+            section = trim(t.substr(1, t.size() - 2));
+        } else if (!t.empty() && t[0] != '#' && t.find('=') != std::string::npos) {
+            const std::string key = trim(t.substr(0, t.find('=')));
+            const std::string full = section.empty() ? key : section + "." + key;
+            if (full == "paths.data" || full == "paths.tmp") continue;
+        }
         out << line << "\n";
     }
     host_log("bbgoated: first start - %s imported into %s (bbhost's file is only read)", from.c_str(), to.c_str());
@@ -395,6 +433,31 @@ void import_from_bbhost(const std::string& to) {
 
 void normalize_layer(const std::string& file, std::map<std::string, std::string>* kv);  // below
 std::string dir_of(const std::string& file);                                            // below
+
+// Whether `p` is folder `dir` or inside it, however either is spelled:
+// separators, "..", a trailing slash, letter case on Windows, a link.
+bool path_within(const std::string& p, const std::string& dir) {
+    namespace fs = std::filesystem;
+    if (p.empty() || dir.empty()) return false;
+    const auto norm = [](const std::string& s) {
+        std::error_code ec;
+        fs::path q = fs::weakly_canonical(fs::path(s), ec);
+        if (ec) {
+            ec.clear();
+            q = fs::absolute(fs::path(s), ec).lexically_normal();
+        }
+        std::string g = q.generic_string();
+        while (g.size() > 1 && g.back() == '/') g.pop_back();
+#if defined(_WIN32)
+        for (char& ch : g) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+#endif
+        return g;
+    };
+    const std::string a = norm(p), b = norm(dir);
+    if (a == b || (a.size() > b.size() && a.compare(0, b.size(), b) == 0 && a[b.size()] == '/')) return true;
+    std::error_code ec;
+    return fs::equivalent(fs::path(p), fs::path(dir), ec);
+}
 
 // Where bbhost keeps its saves: its config's [paths] data, else its default.
 std::string bbhost_data_dir() {
@@ -823,12 +886,33 @@ bool config_load(int argc, char** argv, HostConfig* out, std::string* error) {
         const std::string beside = (c.eboot.empty() ? exe_dir() : (dir_of(c.eboot).empty() ? "." : dir_of(c.eboot))) + "/data";
         c.data = kBbgoated ? user_data_dir() : dir_exists(beside + "/saves") ? beside : user_data_dir();
     }
+    // bbgoated never runs on bbhost's data folder - its saves, their backup
+    // rotation (which deletes old backups) and tmp would be bbhost's -
+    // whatever names it: bbgoated.toml, a local or --config layer, --data,
+    // the setup window's Data folder.
+    std::vector<std::string> bbhost_data;
+    if (kBbgoated) bbhost_data = {bbhost_data_dir(), user_data_dir_of("bbhost")};
+    const auto bbhosts = [&](const std::string& path) {
+        for (const std::string& d : bbhost_data) {
+            if (path_within(path, d)) return true;
+        }
+        return false;
+    };
+    if (bbhosts(c.data)) {
+        const std::string own = user_data_dir();
+        host_log("bbgoated: the data folder %s is bbhost's - bbgoated keeps its own, %s", c.data.c_str(), own.c_str());
+        c.data = own;
+    }
     if (c.mods.empty() && dir_exists(exe_dir() + "/data/mods")) {
         // The package's own asset overlay (the debug menu's font), wherever
         // the saves are.
         c.mods = exe_dir() + "/data/mods";
     }
     if (c.tmp.empty() && !c.data.empty()) {
+        c.tmp = c.data + "/tmp";
+    }
+    if (bbhosts(c.tmp)) {
+        host_log("bbgoated: the tmp folder %s is in bbhost's data folder - bbgoated keeps its own", c.tmp.c_str());
         c.tmp = c.data + "/tmp";
     }
     // The file system layer makes the last level only; the per-user data
