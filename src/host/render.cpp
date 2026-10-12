@@ -9,6 +9,7 @@
 #include "engine/gx_state.h"
 #include "host/dlaa.h"
 #include "host/gpu_internal.h"
+#include "host/perf/vk/async_skip.h"
 #include "host/shader_patch.h"
 #include "host/tess_lds.h"
 #include "host/translation_cache.h"
@@ -12311,6 +12312,25 @@ bool host_gpu_draw(const GpuDraw& d) {
     return tess_draw_one(d, t);
 }
 
+// bbgoated (host/perf/vk/async_skip.cpp, BBHOST_BBG_ASYNC_SKIP): what the skip rules look at.
+static AsyncSkipDraw async_skip_draw_of(const GpuDraw& d, const DrawState& s, std::uint64_t key, const GfxPipeline& pl) {
+    const auto writes = [](const gcn::TranslateResult& m) {
+        if (!m.store_buffers.empty() || m.untraced_stores) return true;
+        for (const gcn::ImageBinding& b : m.images) if (b.storage) return true;
+        for (const gcn::BufferBinding& b : m.buffers) if (b.written) return true;
+        return false;
+    };
+    AsyncSkipDraw a;
+    a.pipeline_key = key;
+    a.pass = pass_key(s);
+    a.count = d.index_count;
+    a.indirect = d.indirect_va != 0;
+    a.tessellated = t_tess != nullptr;
+    a.stores = writes(pl.vs.meta()) || writes(pl.ps.meta());
+    a.occlusion = occlusion_interval_open_locked();
+    return a;
+}
+
 static bool draw_impl(const GpuDraw& d) {
     g_draw_dummies = 0;  // the draw record takes the count of this draw's
     t_draw_pipeline = nullptr;
@@ -14239,6 +14259,12 @@ static bool draw_impl(const GpuDraw& d) {
             if (g_async_pipelines && pl.pipeline && !g_dump_spirv && !g_token_user_data_check) {
                 queue_lean_variant(pl, lean_key, s, vs_words, fetch_words, ps_words, vs_name, ps_name, vs_dims, ps_dims, vs_sampler_modes,
                                    ps_sampler_modes, vertex_plan);
+            } else if (g_async_pipelines && !g_dump_spirv && !g_token_user_data_check && async_skip_on() &&
+                       async_skip_draw_locked(async_skip_draw_of(d, s, key, pl))) {
+                // bbgoated (host/perf/vk/async_skip.cpp, BBHOST_BBG_ASYNC_SKIP): a worker builds it; this draw is skipped meanwhile.
+                queue_lean_variant(pl, lean_key, s, vs_words, fetch_words, ps_words, vs_name, ps_name, vs_dims, ps_dims, vs_sampler_modes,
+                                   ps_sampler_modes, vertex_plan);
+                return true;
             } else {
                 pl.lean_variant = &gfx_pipeline(s, lean_key, vs_words, fetch_words, ps_words, vs_name, ps_name, vs_dims, ps_dims,
                                                 vs_sampler_modes, ps_sampler_modes, true, vertex_plan);
@@ -14254,6 +14280,11 @@ static bool draw_impl(const GpuDraw& d) {
             if (!lean.failed && fits) bind_pl = &lean;
         }
     }
+    // bbgoated (host/perf/vk/async_skip.cpp): the variant this draw would bind is still on a worker and the
+    // fallback was never created - skip rather than build the fallback here.
+    if (bind_pl == &pl && !pl.pipeline && !pl.failed && pl.lean_building && async_skip_on() &&
+        async_skip_draw_locked(async_skip_draw_of(d, s, key, pl)))
+        return true;
     if (skipped_tables[0] | skipped_tables[1]) {
         bump(g_skip_draws, 1);
         bump(g_tables_skipped, static_cast<std::uint64_t>(__builtin_popcount(skipped_tables[0]) + __builtin_popcount(skipped_tables[1])));
@@ -14514,6 +14545,7 @@ static bool draw_impl(const GpuDraw& d) {
         }
     }
     g_pass_profile_name = &bind_pl->profile_name;
+    if (async_skip_on()) async_skip_note_pass_locked(pass_key(s));  // bbgoated: the rules' pass history (host/perf/vk/async_skip.cpp)
     begin_pass(s, pass_key(s), sample_hazard);
     draw_stamp.to(kRenderCostPass);
     // Drivers finalise a pipeline's ISA on first use, so a pathological
