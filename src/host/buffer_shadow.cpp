@@ -760,6 +760,13 @@ bool shadow_stage_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
     return true;
 }
 
+// bbgoated (host/perf/vk/device_mem.cpp): see gpu_internal.h.
+namespace {
+bool g_feed_shaders = false;  // this upload buffer carries copies shaders read
+}  // namespace
+VkCommandBuffer shadow_upload_cmd_for_bbg_locked() { return upload_cmd_locked(); }
+void shadow_uploads_feed_shaders_locked() { g_feed_shaders = true; }
+
 void shadow_probe_locked(std::uint64_t va, std::uint64_t bytes, char* out, std::size_t n) {
     if (!out || !n) return;
     out[0] = 0;
@@ -899,7 +906,14 @@ VkCommandBuffer shadow_end_uploads_locked() {
     VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     mb.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    VkPipelineStageFlags dst_stages = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+    if (g_feed_shaders) {  // bbgoated: constants and params copied here too (host/perf/vk/device_mem.cpp)
+        mb.dstAccessMask |= VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
+        dst_stages |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                      (g.has_tessellation ? VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT : 0);
+        g_feed_shaders = false;
+    }
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, dst_stages, 0, 1, &mb, 0, nullptr, 0, nullptr);
     vkEndCommandBuffer(cmd);
     g_upload_slot = -1;
     return cmd;

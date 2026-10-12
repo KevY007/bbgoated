@@ -678,7 +678,7 @@ void begin_recording_locked();
 std::uint32_t alloc_params_slot_locked(const gcn::StageParams& params, VkDescriptorBufferInfo& out);
 VkDescriptorSet alloc_set_locked(VkDescriptorSetLayout layout = VK_NULL_HANDLE);  // the shared layout when null
 bool rebuild_page_tables();
-bool create_dev_buffer(DevBuffer& b, std::uint64_t size, bool host_visible, bool cached = false);  // cached: host-cached memory, for readbacks
+bool create_dev_buffer(DevBuffer& b, std::uint64_t size, bool host_visible, bool cached = false, bool rebar = false);  // cached: host-cached memory, for readbacks; rebar: video memory the CPU writes (bbgoated)
 std::uint32_t find_memory_type(std::uint32_t type_bits, VkMemoryPropertyFlags want);
 bool extract_program(std::uint64_t code_va, std::vector<std::uint32_t>& words, std::string& name);
 // A GX shader creator ran (render.cpp; host_gpu_note_shader_created).
@@ -773,6 +773,11 @@ std::string indirect_clamp_report();
 // is still serving has been written since this recording's check of it.
 void shadow_probe_locked(std::uint64_t va, std::uint64_t bytes, char* out, std::size_t n);
 VkCommandBuffer shadow_end_uploads_locked();
+// bbgoated (host/perf/vk/device_mem.cpp): the slot's upload buffer for copies
+// shaders read (constants, params), begun if it is not; its closing barrier
+// then covers shader reads as well as vertex and index fetches.
+VkCommandBuffer shadow_upload_cmd_for_bbg_locked();
+void shadow_uploads_feed_shaders_locked();
 // The sparse page binds this recording's copies need, issued on the queue
 // (vkQueueBindSparse); returns the semaphore the submission must wait on, or
 // VK_NULL_HANDLE when there were none. Call after shadow_end_uploads_locked.
