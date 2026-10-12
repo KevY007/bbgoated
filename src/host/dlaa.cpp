@@ -1015,7 +1015,7 @@ bool dlaa_running() {
     return config_on() && g_dlaa_ngx_ok.load(std::memory_order_acquire) && g_s.enabled.load(std::memory_order_relaxed);
 }
 
-// bbgoated: the window thread, every pump. While DLAA runs, the game's own
+// bbgoated: the pump loop's thread, every pass. While DLAA runs, the game's own
 // anti-aliasing is held off; it comes back when DLAA is turned off, if the
 // player had it on (host/dlaa_aa.h). Looked at only when DLAA or a setting changed.
 void dlaa_aa_tick() {
