@@ -9,6 +9,7 @@
 #include "host/perf/census.h"
 #include "host/perf/vk/cb_ring.h"
 #include "host/perf/vk/cs_buffers.h"
+#include "host/perf/vk/cs_set_memo.h"
 #include "host/perf/vk/device_mem.h"
 #include "host/shader_patch.h"
 #include "host/shaders/gpu_stall.spv.h"
@@ -4238,6 +4239,7 @@ void retire_slot_locked(int k) {
     indirect_stats_retired_locked(sl.serial);
     indirect_clamp_retired_locked(sl.serial);
     vkResetDescriptorPool(g.device, sl.pool, 0);
+    cs_set_memo_pool_reset_locked(k);  // bbgoated (host/perf/vk/cs_set_memo.cpp, BBHOST_BBG_CS_SET_MEMO)
     sl.spare_sets.clear();
     for (DevBuffer& b : sl.garbage) {
         vkDestroyBuffer(g.device, b.buffer, nullptr);
@@ -4948,6 +4950,7 @@ void defer_destroy_image(VkImage image, VkDeviceMemory memory) {
 void defer_destroy_view(VkImageView view) {
     bump_view_epoch();
     if (!view) return;
+    cs_set_memo_forget_view_locked(view);  // bbgoated (host/perf/vk/cs_set_memo.cpp, BBHOST_BBG_CS_SET_MEMO)
     set_cache_forget_view_locked(view);
     forget_view_locked(view);
     bindless_view_retired_locked(view);
@@ -4960,6 +4963,7 @@ void defer_destroy_view(VkImageView view) {
 // view memos every frame: on a Steam Deck building views was 9.5% of the
 // command processor, the words memo hit 47%.
 void defer_destroy_private_view(VkImageView view) {
+    cs_set_memo_forget_view_locked(view);  // bbgoated (host/perf/vk/cs_set_memo.cpp): it moves no epoch, so it is forgotten by name
     if (view) g.slots[g.slot].dead_views.push_back(view);
 }
 
@@ -5894,8 +5898,9 @@ bool host_gpu_dispatch(const GpuDispatch& d) {
     if (bbg_cs_cb()) resolve_dispatch_buffers_locked(pl.meta, d.user_data, params, cb_infos);
     VkDescriptorBufferInfo ubi{};
     alloc_params_slot_locked(params, ubi);
-    VkDescriptorSet set = alloc_set_locked();
-    if (!set) {
+    const bool memo = cs_set_memo_on();  // bbgoated (host/perf/vk/cs_set_memo.cpp, BBHOST_BBG_CS_SET_MEMO): the set once its writes are known
+    VkDescriptorSet set = memo ? VK_NULL_HANDLE : alloc_set_locked();
+    if (!set && !memo) {
         host_log("gpu: descriptor set allocation failed");
         g.failures.fetch_add(1);
         return false;
@@ -5911,6 +5916,7 @@ bool host_gpu_dispatch(const GpuDispatch& d) {
     std::vector<VkDescriptorImageInfo> infos;
     infos.reserve(pl.meta.images.size() + pl.meta.samplers.size() + 1);
     bind_stage_images(set, pl.meta, stage_images, writes, infos, pl.name.c_str());
+    if (memo && !cs_set_memo_take_locked(writes, set)) return false;  // bbgoated: this slot's set with these writes, or a new one
     VkDescriptorSet cb_set = VK_NULL_HANDLE;  // bbgoated (host/perf/vk/cs_buffers.cpp): set 1, the constant buffers
     if (!bbg_cs_cb_set_locked(pl.meta, params, cb_infos, writes, cb_set)) return false;
     vkUpdateDescriptorSets(g.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
