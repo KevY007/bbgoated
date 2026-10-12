@@ -7,6 +7,7 @@
 #include "host/draw_capture.h"
 #include "host/gpu_internal.h"
 #include "host/perf/census.h"
+#include "host/perf/vk/device_mem.h"
 #include "host/shader_patch.h"
 #include "host/shaders/gpu_stall.spv.h"
 #include "host/translation_cache.h"
@@ -494,7 +495,7 @@ bool set_page_locked(std::uint64_t va, std::uint64_t dev) {
     auto it = g.l2.find(i1);
     if (it == g.l2.end()) {
         DevBuffer t;
-        if (!create_dev_buffer(t, gcn::kL2Entries * 8, true)) return false;
+        if (!create_dev_buffer(t, gcn::kL2Entries * 8, true, false, bbg_pt_rebar())) return false;  // bbgoated: BBHOST_BBG_PT_MEM
         fill_sink(t);
         it = g.l2.emplace(i1, t).first;
         static_cast<std::uint64_t*>(g.l1.map)[i1] = t.address;
@@ -916,7 +917,7 @@ std::uint32_t host_memory_type(std::uint32_t type_bits) {
     return UINT32_MAX;
 }
 
-bool create_dev_buffer(DevBuffer& b, std::uint64_t size, bool host_visible, bool cached) {
+bool create_dev_buffer(DevBuffer& b, std::uint64_t size, bool host_visible, bool cached, bool rebar) {
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = size;
     bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
@@ -939,8 +940,20 @@ bool create_dev_buffer(DevBuffer& b, std::uint64_t size, bool host_visible, bool
             req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
         if (c != UINT32_MAX) mai.memoryTypeIndex = c;
     }
+    // bbgoated (host/perf/vk/device_mem.cpp): video memory the CPU writes, where
+    // there is such a type; with no room there it goes where it would have.
+    const std::uint32_t upstream_type = mai.memoryTypeIndex;
+    if (host_visible && rebar) {
+        const std::uint32_t r = bbg_rebar_type(req.memoryTypeBits);
+        if (r != UINT32_MAX) mai.memoryTypeIndex = r;
+    }
     if (mai.memoryTypeIndex == UINT32_MAX) return false;
-    if (vkAllocateMemory(g.device, &mai, nullptr, &b.memory) != VK_SUCCESS) {
+    VkResult allocated = vkAllocateMemory(g.device, &mai, nullptr, &b.memory);
+    if (allocated != VK_SUCCESS && mai.memoryTypeIndex != upstream_type && upstream_type != UINT32_MAX) {
+        mai.memoryTypeIndex = upstream_type;
+        allocated = vkAllocateMemory(g.device, &mai, nullptr, &b.memory);
+    }
+    if (allocated != VK_SUCCESS) {
         // Video memory is full: the buffer in host memory, read across the
         // bus but there (and the buffer shadow gives its mirrors back).
         const std::uint32_t host = host_visible || !vram_fallback_on() ? UINT32_MAX : host_memory_type(req.memoryTypeBits);
@@ -2426,6 +2439,7 @@ bool init_locked() {
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = static_cast<VkDeviceSize>(kParamsStride) * kMaxQueued * kStageSlots * g.slot_count;
     bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    if (bbg_params_mem() == kParamsDevice) bci.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;  // bbgoated: the twin's copy source
     vkCreateBuffer(g.device, &bci, nullptr, &g.ubo);
     VkMemoryRequirements req{};
     vkGetBufferMemoryRequirements(g.device, g.ubo, &req);
@@ -2444,22 +2458,37 @@ bool init_locked() {
     if (mai.memoryTypeIndex == UINT32_MAX) {
         mai.memoryTypeIndex = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     }
+    // bbgoated (host/perf/vk/device_mem.cpp, BBHOST_BBG_PARAMS_MEM=rebar): the ring in video memory the CPU writes;
+    // with no room there it stays where it was.
+    const std::uint32_t params_type = mai.memoryTypeIndex;
+    if (bbg_params_mem() == kParamsRebar) {
+        const std::uint32_t r = bbg_rebar_type(req.memoryTypeBits);
+        if (r != UINT32_MAX) mai.memoryTypeIndex = r;
+    }
     host_log("gpu: params ring in memory type %u (flags 0x%x)", mai.memoryTypeIndex,
              mai.memoryTypeIndex < g.mem_props.memoryTypeCount ? g.mem_props.memoryTypes[mai.memoryTypeIndex].propertyFlags : 0u);
-    if (vkAllocateMemory(g.device, &mai, nullptr, &g.ubo_mem) != VK_SUCCESS) {
+    VkResult params_allocated = vkAllocateMemory(g.device, &mai, nullptr, &g.ubo_mem);
+    if (params_allocated != VK_SUCCESS && mai.memoryTypeIndex != params_type) {
+        host_log("bbg: no room for the params ring in video memory; it stays in memory type %u", params_type);
+        mai.memoryTypeIndex = params_type;
+        params_allocated = vkAllocateMemory(g.device, &mai, nullptr, &g.ubo_mem);
+    }
+    if (params_allocated != VK_SUCCESS) {
         host_log("gpu: params buffer allocation failed");
         return false;
     }
     vkBindBufferMemory(g.device, g.ubo, g.ubo_mem, 0);
     vkMapMemory(g.device, g.ubo_mem, 0, VK_WHOLE_SIZE, 0, &g.ubo_map);
     g_params_desc = {g.ubo, 0, sizeof(gcn::StageParams)};
+    // bbgoated (BBHOST_BBG_PARAMS_MEM=device): shaders read the device-local twin, filled before each submission.
+    if (bbg_params_mem() == kParamsDevice && bbg_params_twin_create_locked(bci.size)) g_params_desc.buffer = g_bbg_params_twin;
     if (!create_dummy_resources()) {
         host_log("gpu: dummy resources failed");
         return false;
     }
     bindless_dummies_locked(g.dummy_view, g.dummy_view, g.dummy_sampler);  // slot 0 of the global arrays
-    if (!create_dev_buffer(g.l1, gcn::kL1Entries * 8, true) || !create_dev_buffer(g.sink, 1ull << gcn::kPageShift, false) ||
-        !create_dev_buffer(g.sink_l2, gcn::kL2Entries * 8, true)) {
+    if (!create_dev_buffer(g.l1, gcn::kL1Entries * 8, true, false, bbg_pt_rebar()) || !create_dev_buffer(g.sink, 1ull << gcn::kPageShift, false) ||
+        !create_dev_buffer(g.sink_l2, gcn::kL2Entries * 8, true, false, bbg_pt_rebar())) {  // bbgoated: BBHOST_BBG_PT_MEM
         host_log("gpu: page table buffers failed");
         return false;
     }
@@ -2578,6 +2607,7 @@ std::uint32_t alloc_params_slot_locked(const gcn::StageParams& params, VkDescrip
     const std::uint32_t index = static_cast<std::uint32_t>(g.slot) * kMaxQueued * kStageSlots + slot;
     std::memcpy(static_cast<std::uint8_t*>(g.ubo_map) + static_cast<std::size_t>(index) * kParamsStride, &params, sizeof(params));
     out = {g.ubo, static_cast<VkDeviceSize>(index) * kParamsStride, sizeof(gcn::StageParams)};
+    if (g_bbg_params_twin) out.buffer = g_bbg_params_twin;  // bbgoated (BBHOST_BBG_PARAMS_MEM=device)
     return slot;
 }
 
@@ -5170,6 +5200,7 @@ void submit_locked() {
         bump(g_stream_stats.endbegin_n);
     }
     g.recording = false;
+    bbg_presubmit_locked();  // bbgoated (host/perf/vk/device_mem.cpp): params twin, constant ring copies - ahead of this work
     // The vertex and index copies this recording's draws read go first.
     const VkCommandBuffer cmds[2] = {shadow_end_uploads_locked(), g.cmd_};
     const VkSemaphore bind_sem = shadow_bind_sparse_locked();
