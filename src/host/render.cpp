@@ -9653,9 +9653,18 @@ const bool g_vertex_table_from_memory = [] {
 // BBHOST_VERTEX_STAGE (on unless 0): a vertex-input range the buffer shadow
 // keeps in host memory is copied into device memory for its draw
 // (shadow_stage_locked) instead of fetched from the import.
+// bbgoated: off unless 1. On Windows (RTX 5080) the copies came to ~35 MiB a
+// frame where a ring's pages had gone dynamic, and the command processor
+// waited on the GPU for most of each frame: 37-46 fps at the Astral
+// Clocktower, Mensis, Lumenwood Garden and the Fishing Hamlet in about half
+// the sessions, 60 in 8 of 8 with it off (workspace docs/perf, cells I-L).
 const bool g_vertex_stage = [] {
     const char* e = std::getenv("BBHOST_VERTEX_STAGE");
+#if defined(BBHOST_BBGOATED)
+    return e && e[0] == '1';
+#else
     return !(e && e[0] == '0');
+#endif
 }();
 // BBHOST_VERTEX_INPUT_NO_GX (on unless 0): a draw that carries no GX geometry -
 // YEBIS's post passes, the wrapper's own Scaleform, gamma and present draws -

@@ -74,6 +74,7 @@ Patch switches go under `[patches]` in `%APPDATA%\bbgoated\bbgoated.toml`. Envir
 | The Old Hunters | on | `old-hunters = false` |
 | NVIDIA DLAA (RTX cards; other GPUs skip it) | on | `enabled = false` under `[dlaa]`; `Ctrl+F1` or `Ctrl+F5` in game |
 | DLAA's DLSS preset (a letter, e.g. `K`) | the driver's | `preset = "K"` under `[dlaa]` |
+| next-steps' per-draw vertex copies (a ring kept in host memory, copied for each draw) | off | `BBHOST_VERTEX_STAGE=1`; with it on, `BBHOST_VERTEX_STAGE_SHARE=0` copies for every draw |
 | Light-grid tiles from the render size instead of the window | off | `BBHOST_LIGHT_GRID_BASIS=render` |
 | Red-zone audit (observe-only diagnostics) | off | `BBHOST_REDZONE_AUDIT=1` |
 | Every upstream bbhost switch | as upstream | `docs/running.md` |
