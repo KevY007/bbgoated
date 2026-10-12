@@ -17,6 +17,7 @@
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <tlhelp32.h>
 #else
 #include <sys/stat.h>
 #include <unistd.h>
@@ -275,16 +276,24 @@ std::string env_dir(const char* name) {
 // download or update of bbhost then finds - the game's paths, the F10
 // settings, the account. BBHOST_CONFIG_DIR replaces the config one (tests,
 // a portable setup).
-std::string user_config_dir() {
-    if (std::string d = env_dir("BBHOST_CONFIG_DIR"); !d.empty()) return d;
+// The per-user config folder of a program: "bbhost", or "bbgoated" for its own.
+std::string user_config_dir_of(const char* program) {
 #if defined(_WIN32)
-    if (std::string d = env_dir("APPDATA"); !d.empty()) return d + "/bbhost";
+    if (std::string d = env_dir("APPDATA"); !d.empty()) return d + "/" + program;
 #else
-    if (std::string d = env_dir("XDG_CONFIG_HOME"); !d.empty()) return d + "/bbhost";
-    if (std::string d = env_dir("HOME"); !d.empty()) return d + "/.config/bbhost";
+    if (std::string d = env_dir("XDG_CONFIG_HOME"); !d.empty()) return d + "/" + program;
+    if (std::string d = env_dir("HOME"); !d.empty()) return d + "/.config/" + program;
 #endif
     return exe_dir();
 }
+
+std::string user_config_dir() {
+    if (std::string d = env_dir("BBHOST_CONFIG_DIR"); !d.empty()) return d;
+    return user_config_dir_of(kBbgoated ? "bbgoated" : "bbhost");
+}
+
+// The config's file name: bbgoated keeps its own beside bbhost's.
+const char* config_name() { return kBbgoated ? "bbgoated.toml" : "bbhost.toml"; }
 
 // The per-user data folder of a program: "bbhost", or "bbgoated" for its own.
 std::string user_data_dir_of(const char* program) {
@@ -300,21 +309,113 @@ std::string user_data_dir_of(const char* program) {
 
 std::string user_data_dir() { return user_data_dir_of(kBbgoated ? "bbgoated" : "bbhost"); }
 
-// bbgoated's first start: bbhost's saves (and their backups), copied. The
-// source folder is only read, and a folder that has saves already is never
-// copied over - it is the player's bbgoated progress.
+// Whether a bbhost.exe runs now (Windows): bbgoated copies nothing of its
+// files while it may be writing them.
+bool bbhost_running() {
+#if defined(_WIN32)
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    bool found = false;
+    for (BOOL ok = Process32FirstW(snap, &pe); ok && !found; ok = Process32NextW(snap, &pe))
+        found = pe.th32ProcessID != GetCurrentProcessId() && _wcsicmp(pe.szExeFile, L"bbhost.exe") == 0;
+    CloseHandle(snap);
+    return found;
+#else
+    return false;
+#endif
+}
+
+// bbgoated's first start: bbhost's saves (and their backups), its shader
+// caches and downloaded assets (data/bbhost: no compile hitches on the first
+// run) and its trophies, copied. The source folder is only read; a marker
+// written once everything came over means it never happens again. Saves are
+// never copied into a folder that has some already - the player's bbgoated
+// progress - and no file there is ever replaced. A copy cut short is
+// finished at the next start (existing files are skipped).
 void seed_saves(const std::string& from, const std::string& to) {
     namespace fs = std::filesystem;
     std::error_code ec;
-    if (from.empty() || from == to || fs::exists(fs::path(to) / "saves", ec)) return;
-    for (const char* sub : {"saves", "save-backups"}) {
+    const fs::path marker = fs::path(to) / "bbgoated-saves-from-bbhost.txt";
+    if (from.empty() || from == to || fs::exists(marker, ec)) return;
+    if (bbhost_running()) {
+        host_log("bbgoated: bbhost is running - its saves are copied at a start when it is not");
+        return;
+    }
+    const bool saves = !fs::exists(fs::path(to) / "saves", ec) || fs::exists(fs::path(to) / "saves.copying", ec);
+    if (saves) std::ofstream(fs::path(to) / "saves.copying") << from << "\n";
+    bool ok = true;
+    for (const char* sub : {"saves", "save-backups", "bbhost", "trophies.txt"}) {
+        const bool progress = std::strcmp(sub, "saves") == 0 || std::strcmp(sub, "save-backups") == 0;
+        if (progress && !saves) continue;
         const fs::path src = fs::path(from) / sub;
-        if (!fs::is_directory(src, ec)) continue;
+        if (!fs::exists(src, ec)) continue;
         ec.clear();
         fs::copy(src, fs::path(to) / sub, fs::copy_options::recursive | fs::copy_options::skip_existing, ec);
+        if (ec) ok = false;
         host_log("bbgoated: %s %s from %s into %s (the source is only read)", ec ? "could not copy" : "copied", sub,
                  src.generic_string().c_str(), to.c_str());
     }
+    if (!ok) return;
+    std::ofstream(marker) << "bbhost's saves were copied from " << from << "\n";
+    fs::remove(fs::path(to) / "saves.copying", ec);
+}
+
+// bbgoated's first start: bbhost's per-user config gives bbgoated.toml its
+// first contents - the game's paths, the server, the key bindings - and its
+// official plugins come over with their signatures. bbhost's files are only
+// read. [paths] data and tmp stay behind: bbgoated's saves live in a data
+// folder of its own.
+void import_from_bbhost(const std::string& to) {
+    namespace fs = std::filesystem;
+    const std::string dir = user_config_dir_of("bbhost");
+    const std::string from = dir + "/bbhost.toml";
+    std::ifstream in(from, std::ios::binary);
+    if (!in) return;
+    std::ofstream out(to, std::ios::binary);
+    std::string section;
+    for (std::string line; std::getline(in, line);) {
+        std::string t = line;
+        while (!t.empty() && (t.back() == '\r' || t.back() == ' ')) t.pop_back();
+        const std::size_t a = t.find_first_not_of(" \t");
+        if (a != std::string::npos && t[a] == '[') section = t.substr(a);
+        if (section == "[paths]" && a != std::string::npos && (t.compare(a, 4, "data") == 0 || t.compare(a, 3, "tmp") == 0)) continue;
+        out << line << "\n";
+    }
+    host_log("bbgoated: first start - %s imported into %s (bbhost's file is only read)", from.c_str(), to.c_str());
+    std::error_code ec;
+    if (fs::is_directory(dir + "/plugins", ec)) {
+        fs::create_directories(fs::path(to).parent_path() / "plugins", ec);
+        fs::copy(dir + "/plugins", fs::path(to).parent_path() / "plugins",
+                 fs::copy_options::recursive | fs::copy_options::skip_existing, ec);
+        host_log("bbgoated: %s bbhost's plugins", ec ? "could not copy" : "copied");
+    }
+}
+
+void normalize_layer(const std::string& file, std::map<std::string, std::string>* kv);  // below
+std::string dir_of(const std::string& file);                                            // below
+
+// Where bbhost keeps its saves: its config's [paths] data, else its default.
+std::string bbhost_data_dir() {
+    std::map<std::string, std::string> kv;
+    std::string err;
+    const std::string cfg = user_config_dir_of("bbhost") + "/bbhost.toml";
+    if (file_exists(cfg) && parse_file(cfg, &kv, &err)) {
+        normalize_layer(cfg, &kv);
+        auto it = kv.find("paths.data");
+        if (it != kv.end() && !unquote(it->second).empty()) return unquote(it->second);
+        // bbhost's old default: a data folder beside the eboot (the game
+        // folder's eboot.bin, else its own), when it holds saves.
+        for (const char* k : {"paths.eboot", "paths.app0"}) {
+            const auto e = kv.find(k);
+            if (e == kv.end() || unquote(e->second).empty()) continue;
+            const std::string v = unquote(e->second);
+            const std::string beside = (std::strcmp(k, "paths.eboot") == 0 ? dir_of(v) : v) + "/data";
+            if (dir_exists(beside + "/saves")) return beside;
+        }
+    }
+    return user_data_dir_of("bbhost");
 }
 
 bool make_dirs(const std::string& path) {
@@ -603,10 +704,12 @@ bool config_load(int argc, char** argv, HostConfig* out, std::string* error) {
     //   settings, as the playtest kit's dev server). A user config that does
     //   not exist yet is imported from the second when that names the game,
     //   and one that does is given the keys bbhost has since come to expect.
-    const std::string user_cfg = user_config_dir() + "/bbhost.toml";
-    // bbgoated: its own choices, a layer over bbhost.toml (see kBbgoated).
-    const std::string own_cfg = kBbgoated ? user_config_dir() + "/bbgoated.toml" : std::string();
+    const std::string user_cfg = user_config_dir() + "/" + config_name();
     make_dirs(user_config_dir());  // where the F10 settings are saved, whatever else exists
+    // bbgoated's first start (its own per-user folder, kBbgoated): bbhost's
+    // config, which is only read, gives bbgoated.toml its first contents. Not
+    // for a folder of its own (BBHOST_CONFIG_DIR: tests, sandboxes).
+    if (kBbgoated && !file_exists(user_cfg) && env_dir("BBHOST_CONFIG_DIR").empty()) import_from_bbhost(user_cfg);
     std::string local_cfg;
     // Absolute, so an import into the user config can resolve its relative paths.
     std::string cwd;
@@ -614,32 +717,28 @@ bool config_load(int argc, char** argv, HostConfig* out, std::string* error) {
         std::error_code ec;
         cwd = std::filesystem::current_path(ec).generic_string();
     }
-    for (const std::string& cand : {cwd.empty() ? std::string("bbhost.toml") : cwd + "/bbhost.toml", exe_dir() + "/bbhost.toml"}) {
+    for (const std::string& cand : {cwd.empty() ? std::string(config_name()) : cwd + "/" + config_name(), exe_dir() + "/" + config_name()}) {
         if (file_exists(cand) && cand != user_cfg) {
             local_cfg = cand;
             break;
         }
     }
-    // bbgoated reads bbhost.toml as bbhost left it: no import into it and no
-    // upgrade of it - bbhost upgrades its own file when it runs.
-    if (!kBbgoated && !file_exists(user_cfg) && !local_cfg.empty()) import_legacy(local_cfg, user_cfg);
+    if (!file_exists(user_cfg) && !local_cfg.empty()) import_legacy(local_cfg, user_cfg);
     // An older playtest kit kept the game's paths in its --config file: those
     // (only those) carry over too.
-    if (!kBbgoated && !file_exists(user_cfg) && !explicit_cfg.empty()) {
+    if (!file_exists(user_cfg) && !explicit_cfg.empty()) {
         std::string abs = explicit_cfg;
         if (is_relative_path(abs) && !cwd.empty()) abs = cwd + "/" + abs;
         import_legacy(abs, user_cfg, true);
     }
-    if (!kBbgoated && file_exists(user_cfg)) {
+    if (file_exists(user_cfg)) {
         upgrade_user_config(user_cfg);
         move_live_server_to_https(user_cfg);
         move_ime_to_type(user_cfg);
     }
     std::map<std::string, std::string> merged;
     std::string layers;
-    std::string data_layer;  // the last layer that named paths.data
-    for (const std::string& f : {file_exists(user_cfg) ? user_cfg : std::string(),
-                                 !own_cfg.empty() && file_exists(own_cfg) ? own_cfg : std::string(), local_cfg, explicit_cfg}) {
+    for (const std::string& f : {file_exists(user_cfg) ? user_cfg : std::string(), local_cfg, explicit_cfg}) {
         if (f.empty()) continue;
         std::map<std::string, std::string> kv;
         std::string err;
@@ -661,7 +760,6 @@ bool config_load(int argc, char** argv, HostConfig* out, std::string* error) {
             if (v < 2 && kv.erase("startup.setup_window"))
                 host_log("config: %s is from an older bbhost: its setup_window is set aside until the setup window saves it", f.c_str());
         }
-        if (kv.count("paths.data")) data_layer = f;
         for (auto& [k, v] : kv) merged[k] = v;
         layers += (layers.empty() ? "" : " <- ") + f;
     }
@@ -671,7 +769,7 @@ bool config_load(int argc, char** argv, HostConfig* out, std::string* error) {
     apply_values(merged, &c);
     g_values = merged;
     // The file a player edits: the user config, once there is one.
-    c.config_path = kBbgoated ? own_cfg : file_exists(user_cfg) ? user_cfg : !explicit_cfg.empty() ? explicit_cfg : local_cfg;
+    c.config_path = file_exists(user_cfg) ? user_cfg : !explicit_cfg.empty() ? explicit_cfg : local_cfg;
     c.config_layers = layers;
     if (!explicit_cfg.empty()) {
         // A --config is a profile (the playtest kit's dev server, a second
@@ -686,15 +784,6 @@ bool config_load(int argc, char** argv, HostConfig* out, std::string* error) {
     }
     if (!cli_app0.empty()) c.app0 = cli_app0;
     if (!cli_data.empty()) c.data = cli_data;
-    // bbgoated's data folder is its own unless bbgoated.toml, a local or
-    // --config layer, --data or a BBHOST_CONFIG_DIR setup (tests, sandboxes)
-    // names one: bbhost's (from its bbhost.toml, or its default) is read only
-    // once, for the saves a first start copies.
-    std::string seed_from;
-    if (kBbgoated && env_dir("BBHOST_CONFIG_DIR").empty() && cli_data.empty() && (data_layer.empty() || data_layer == user_cfg)) {
-        seed_from = data_layer.empty() ? user_data_dir_of("bbhost") : c.data;
-        c.data.clear();
-    }
     if (!cli_eboot.empty()) c.eboot = cli_eboot;
     // A config that still holds the template's stand-in path is not configured.
     if (is_placeholder(c.app0)) c.app0.clear();
@@ -745,7 +834,9 @@ bool config_load(int argc, char** argv, HostConfig* out, std::string* error) {
     // The file system layer makes the last level only; the per-user data
     // folder is several levels deep on a first run.
     if (!c.data.empty()) make_dirs(c.data);
-    if (kBbgoated && !seed_from.empty() && !c.data.empty()) seed_saves(seed_from, c.data);
+    // bbgoated's saves start as a copy of bbhost's (seed_saves: once, the source only read).
+    if (kBbgoated && !c.data.empty() && env_dir("BBHOST_CONFIG_DIR").empty() && cli_data.empty())
+        seed_saves(bbhost_data_dir(), c.data);
     if (const char* e = std::getenv("BBHOST_HEADLESS")) {
         if (e[0] == '1') {
             c.headless = true;
@@ -796,7 +887,7 @@ std::string config_setup_help(const HostConfig& c) {
     if (!have_eboot || !have_app0) {
         // The per-user config is the one to fill in: every copy of bbhost,
         // and every update, reads it.
-        const std::string path = user_config_dir() + "/bbhost.toml";
+        const std::string path = user_config_dir() + "/" + config_name();
         if (!file_exists(path)) {
             const bool wrote = make_dirs(user_config_dir()) && config_write_template(path);
             line("bbhost: there is no configuration yet, so there is nothing to run.");
@@ -1059,7 +1150,9 @@ bool config_write_template(const std::string& path) {
 
 std::string config_exe_dir() { return exe_dir(); }
 std::string config_user_dir() { return user_config_dir(); }
-std::string config_user_file() { return user_config_dir() + (kBbgoated ? "/bbgoated.toml" : "/bbhost.toml"); }
+std::string config_user_file() { return user_config_dir() + "/" + config_name(); }
+const char* config_file_name() { return config_name(); }
+std::string config_bbhost_user_dir() { return user_config_dir_of("bbhost"); }
 std::string config_default_data_dir() { return user_data_dir(); }
 
 bool config_set_values(const std::string& path, const std::vector<ConfigEdit>& edits) {

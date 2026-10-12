@@ -15,12 +15,22 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
+#if defined(BBHOST_BBGOATED)
+            VALUE "FileDescription", "bbgoated"
+            VALUE "ProductName", "bbgoated"
+#else
             VALUE "FileDescription", "bbhost"
             VALUE "ProductName", "bbhost"
+#endif
             VALUE "FileVersion", BBHOST_VERSION
             VALUE "ProductVersion", BBHOST_VERSION
+#if defined(BBHOST_BBGOATED)
+            VALUE "InternalName", "bbgoated"
+            VALUE "OriginalFilename", "bbgoated.exe"
+#else
             VALUE "InternalName", "bbhost"
             VALUE "OriginalFilename", "bbhost.exe"
+#endif
             VALUE "LegalCopyright", "GNU General Public License, version 3 or later"
         END
     END

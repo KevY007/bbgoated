@@ -307,7 +307,7 @@ void patch_manifests_apply(ElfImage* image) {
             continue;
         }
         if (patch_manifest_off(m.name)) {
-            host_log("patch: %s off ([patches] in bbhost.toml: the setup window's Patches tab)", m.name.c_str());
+            host_log("patch: %s off ([patches] in %s: the setup window's Patches tab)", m.name.c_str(), config_file_name());
             continue;
         }
         if (!m.option.empty()) {

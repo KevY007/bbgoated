@@ -21,26 +21,32 @@ Put it in a folder of its own, not inside your bbhost folder and not inside the 
 
 ## 3. First start
 
-Start `run-bbhost.bat`, or `run-bbgoated.bat` in a packaged build. It keeps a log in `logs\`.
+Start `run-bbgoated.bat` (packaged build) or `run-bbhost.bat` (source build). It keeps a log in `logs\`.
 
-- **If you already use bbhost:** bbgoated reads bbhost's per-user settings in `%APPDATA%\bbhost\`:
-  - your game paths (`bbhost.toml`);
-  - your F10 options, key bindings and online account (`bbhost-options.toml`);
-  - your plugins.
+bbgoated is **fully separate from bbhost** and any other launcher:
 
-  You don't set anything up again, and you stay signed in to The Hunter's Dream with the same account.
+| | bbgoated | bbhost |
+|---|---|---|
+| Config | `%APPDATA%\bbgoated\bbgoated.toml` | `%APPDATA%\bbhost\bbhost.toml` |
+| F10 settings, key bindings, account | `%APPDATA%\bbgoated\bbgoated-options.toml` | `%APPDATA%\bbhost\bbhost-options.toml` |
+| Plugins | `%APPDATA%\bbgoated\plugins` | `%APPDATA%\bbhost\plugins` |
+| Saves and shader caches | `%LOCALAPPDATA%\bbgoated\data` | wherever bbhost's config says |
+
+- **If you already use bbhost:** on bbgoated's first start it copies over:
+  - your game paths and online server (into `bbgoated.toml`, without bbhost's data folder);
+  - your F10 settings, key bindings and signed-in account (into `bbgoated-options.toml`);
+  - your official plugins;
+  - your saves (`saves\` and `save-backups\`), shader caches and downloaded assets (`bbhost\`) and trophies, from the data folder bbhost's config names (or bbhost's default; or a `data` folder beside the eboot, bbhost's old default).
+
+  bbhost's files are only read. Saves are never copied into a bbgoated data folder that already has some, and no file there is ever replaced. The log says `bbgoated: first start - ... imported` and `bbgoated: copied saves ...`, and a marker file in the data folder stops the save copy from ever happening again. From then on the two programs have separate settings and separate progress, and changing one never affects the other.
 - **If you don't:** the setup window asks for the two paths (the game folder that holds `dvdroot_ps4`, and the decrypted eboot) and offers to link a Hunter's Dream account.
+- **If bbhost is running during bbgoated's first start:** the save copy waits until a start when it isn't, so a save being written is never copied half-done.
 
-### What bbgoated never touches
-
-- **bbhost's `bbhost.toml`:** bbgoated reads it, but its own choices go to `%APPDATA%\bbhost\bbgoated.toml`, a layer over it. Setup-window saves, plugin settings and the data path all go there.
-- **bbhost's saves:** bbgoated keeps its own data folder, `%LOCALAPPDATA%\bbgoated\data` (saves, shader caches, generated files). On its first start it **copies** your bbhost saves, `saves\` and `save-backups\`, from the data folder your `bbhost.toml` names, and logs `bbgoated: copied saves from ... (the source is only read)`. After that the two programs have separate progress.
-
-The first start in a new data folder builds its shader caches ("Building shaders: N left"), which takes a few minutes once.
+Thanks to the copied shader caches the first start goes straight in. Without them (no bbhost before, or after deleting them) it builds the caches first ("Building shaders: N left"), which takes a few minutes once.
 
 ### Playing the same saves in both
 
-If you'd rather share one save folder, so progress continues in both, point bbgoated at bbhost's data folder in `%APPDATA%\bbhost\bbgoated.toml`:
+If you'd rather share one save folder, so progress continues in both, point bbgoated at bbhost's data folder in `%APPDATA%\bbgoated\bbgoated.toml`:
 
 ```toml
 [paths]
@@ -55,12 +61,12 @@ bbgoated is a bbhost client to The Hunter's Dream. You meet ordinary bbhost play
 
 - **One at a time:** don't run bbhost and bbgoated at the same time with the same account. bbgoated logs a warning when it sees `bbhost.exe` running.
 - **Windows Firewall:** it asks once for the new exe. Allow it: the P2P port is UDP 9307, and a blocked port is the most common reason summons fail.
-- **"Recover account":** never use it to "move" your account to bbgoated. It cancels every other device's sign-in, bbhost's included. bbgoated doesn't need it, because it shares bbhost's sign-in.
+- **"Recover account":** never use it to "move" your account to bbgoated. It cancels every other device's sign-in, bbhost's included. bbgoated doesn't need it: your sign-in came over on the first start.
 - **No cheats:** bbgoated ships none. The debug menu plugin used against other players gets accounts banned.
 
 ## 5. Switches
 
-Patch switches go under `[patches]` in `%APPDATA%\bbhost\bbgoated.toml`. Environment switches are set before starting, for example in a copy of `run-bbhost.bat`: `set BBHOST_X=1`.
+Patch switches go under `[patches]` in `%APPDATA%\bbgoated\bbgoated.toml`. Environment switches are set before starting, for example in a copy of `run-bbgoated.bat`: `set BBHOST_X=1`.
 
 | What | Default | Switch |
 |---|---|---|

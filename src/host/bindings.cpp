@@ -210,10 +210,10 @@ void host_bindings_load_defaults() {
     for (const auto& [name, value] : config().keys) {
         const int a = action_named(name.c_str());
         if (a < 0) {
-            host_log("keys: bbhost.toml names no action \"%s\"", name.c_str());
+            host_log("keys: %s names no action \"%s\"", config_file_name(), name.c_str());
             continue;
         }
-        set_from_text(a, value, "bbhost.toml");
+        set_from_text(a, value, config_file_name());
     }
 }
 

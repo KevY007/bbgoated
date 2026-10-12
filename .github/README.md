@@ -21,7 +21,7 @@ bbgoated changes how it is drawn and patched, never how it talks to other player
 
 - **Online** on [The Hunter's Dream](https://thehuntersdream.com), as a bbhost client.
   - It plays co-op, invasions, messages and bloodstains with ordinary bbhost players.
-  - It uses the same account: bbgoated reads the account bbhost already linked.
+  - It uses the same account: it comes over from bbhost once, on bbgoated's first start.
   - The online code is upstream's. The one exception is upstream's own pending TLS fix (PR #74),
     taken ahead of its merge. Before every release, a check script in the workspace repo
     confirms that bbgoated added nothing else there (`docs/bbgoated/UPSTREAM.md`).
@@ -37,7 +37,7 @@ bbgoated changes how it is drawn and patched, never how it talks to other player
 | Based on bbhost's next release (`release/next-steps`) | The flip-after-GPU fix (light flicker when the GPU is at 99%), correct physics and timing at 60/90/120 fps - sprint keeps its speed above 90 fps (bbhost #66) among them - and more shaders lifted | n/a |
 | Upstream fixes ahead of their merge: TLS trust (#74), chromatic aberration toggle on Windows (#70), a ~14 MiB/min trace leak (#117) | Windows bugs | n/a |
 | Intel tone-map fix (Kyo's), Intel CPUs only | Dark/black tone mapping in DLC areas on Intel CPUs | `intel-tonemap = false` under `[patches]` |
-| Shares bbhost's config; keeps its own data folder | Your settings, keys and account carry over; your bbhost saves are never written (bbgoated starts from a copy) | `[paths] data` in `bbgoated.toml` |
+| Fully separate from bbhost and other launchers: its own config (`%APPDATA%\bbgoated`) and data (`%LOCALAPPDATA%\bbgoated\data`) | On the first start it copies your bbhost settings, key bindings, account, official plugins, saves and shader caches. After that the two never share a file, and bbhost's files are only ever read | `bbgoated.toml`, `bbgoated-options.toml` |
 | Light-grid tile basis switch | Measures window-sized vs render-sized light tiles | `BBHOST_LIGHT_GRID_BASIS=render` |
 | Red-zone audit | Counts Windows exceptions inside game functions that use their red zone (a crash class on Intel 12th gen+) | `BBHOST_REDZONE_AUDIT=1` (off by default, observe-only) |
 | Area check on Windows | Automated, repeatable performance A/B at 12 places in the game | `tools/area_check.py --probe` |
