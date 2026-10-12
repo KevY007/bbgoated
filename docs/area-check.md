@@ -76,6 +76,11 @@ the same turn in every run. The settle is still, and so is the capture pass
 below, which needs a still view. The frames are taken where the camera
 stopped. A swept window is not a still one: the plan and the report record the
 sweep, `summary.txt` says it, and `compare` refuses runs whose sweeps differ.
+Both the build (`bbhost`) and the probe (`mapval`) must come from the commit
+that added `--sweep` or later: an older host logs `test: request ... not
+understood` and an older probe skips the step, and the window stays still. A
+swept run checks that the host said `test: stick ... for ... ms` inside each
+window, and reports `sweep not carried out` (exit 1) for each place without it.
 
 The turn was measured on the game (the camera's own angles four times a
 second, at Central Yharnam; the same at the 30, 60 and 120 fps settings). The

@@ -213,6 +213,7 @@ const bool g_present_on_arrival = [] {
 //   menutap <button> [<ms>]  the same, only while one of the game's menus has the
 //                         input - the way through the title that cannot press
 //                         anything in the world, however late it arrives
+// bbgoated: the next entry, and the third word of a request (arg3) that only it reads, are this fork's.
 //   stick <axis> <value> <ms>  hold a stick (lx, ly, rx or ry) at <value> (0-255,
 //                         127 at rest) for <ms>: the right stick's X axis turns the
 //                         follow camera at a steady rate (area_check.py --sweep)
@@ -222,7 +223,7 @@ const bool g_present_on_arrival = [] {
 // NFS, a listing queued behind a shader cache's write-back stopped every flip
 // for 1.5 s, the harness runs' freeze every ~90 s.
 struct TestRequest {
-    std::string name, verb, arg, arg2, arg3;
+    std::string name, verb, arg, arg2, arg3;  // bbgoated: arg3 (stick's <ms>)
 };
 std::mutex g_test_req_mu;
 std::deque<TestRequest> g_test_reqs;  // under g_test_req_mu
@@ -242,7 +243,7 @@ void test_requests_read(const std::string& dir) {
             r.name = p.filename().string();
             {
                 std::ifstream f(p);
-                f >> r.verb >> r.arg >> r.arg2 >> r.arg3;
+                f >> r.verb >> r.arg >> r.arg2 >> r.arg3;  // bbgoated: the third word too (stick's <ms>)
             }
             fs::remove(p, ec);
             std::lock_guard<std::mutex> lk(g_test_req_mu);
@@ -275,7 +276,7 @@ void test_requests(std::uint64_t display_va, std::uint64_t count) {
         todo.swap(g_test_reqs);
     }
     for (const TestRequest& r : todo) {
-        const std::string &verb = r.verb, &arg = r.arg, &arg2 = r.arg2, &arg3 = r.arg3;
+        const std::string &verb = r.verb, &arg = r.arg, &arg2 = r.arg2, &arg3 = r.arg3;  // bbgoated: arg3
         if (verb == "dump" && !arg.empty()) {
             const bool ok = display_va && host_gpu_dump_display(display_va, arg.c_str());
             host_log("test: frame dump at flip %llu to %s%s", static_cast<unsigned long long>(count), arg.c_str(), ok ? "" : " failed");

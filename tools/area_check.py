@@ -38,7 +38,9 @@ time, so the camera turns at a steady rate and stops at the window's end. A
 place is then seen from many sides, the frame times follow what the camera
 faces, and the same turn is made in every run; the frames are taken where the
 camera stopped. A swept window is not a still one: `compare` refuses runs whose
-sweeps differ.
+sweeps differ. The host and the probe must both be from the commit that added
+--sweep or later - older ones ignore the request - so a swept window without the
+host's `test: stick` line is reported as a problem.
 
 The capture pass visits the same places and, after the settle, lets
 BBHOST_CAPTURE_DRAW=*ps take the first draw of up to --captures pixel shaders
@@ -425,6 +427,9 @@ LOADING = re.compile(r"\] loading: ([\d.]+) s \(flips")
 TAP_PRESSED = re.compile(r"\] test: menutap (\S+) \(0x[0-9a-f]+\) for (\d+) ms at flip (\d+)")
 TAP_REFUSED = re.compile(r"\] test: menutap (\S+) at flip (\d+): no menu has the input")
 PAD_READ = re.compile(r"\] pad: buttons 0x([0-9a-f]+) -> 0x([0-9a-f]+) at flip (\d+)")
+# The host's answer to the probe's stick request (--sweep): it holds the stick. A host from before
+# --sweep logs "test: request ... not understood" instead, a refusal says "not an axis ...".
+STICK_HELD = re.compile(r"\] test: stick (\w+) (\d+) for (\d+) ms at flip (\d+)")
 LOAD_BEGINS = re.compile(r"\] loading: begins, flip (\d+)")
 # The 5-second report's memory lines (host/gpu.cpp, host/render.cpp).
 MEMORY = re.compile(r"\] +gpu: memory by heap: (.*?)\s*$")
@@ -560,7 +565,8 @@ class Log:
                          ("slow_library", SLOW_LIBRARY), ("stall", STALL), ("long_frame", LONG_FRAME), ("ps_lifted", PS_LIFTED),
                          ("ps_not_lifted", PS_NOT_LIFTED), ("pipeline_failed", PIPELINE_FAILED), ("world", WORLD),
                          ("memory", MEMORY), ("image_heap", IMAGE_HEAP), ("memory_total", MEMORY_TOTAL),
-                         ("tap_pressed", TAP_PRESSED), ("tap_refused", TAP_REFUSED), ("pad_read", PAD_READ)):
+                         ("tap_pressed", TAP_PRESSED), ("tap_refused", TAP_REFUSED), ("pad_read", PAD_READ),
+                         ("stick_held", STICK_HELD)):
             m = rx.search(line)
             if not m:
                 continue
@@ -600,6 +606,8 @@ class Log:
                 self._ev(i, kind, flip=int(m.group(2)))
             elif kind == "pad_read":
                 self._ev(i, kind, buttons=int(m.group(2), 16), flip=int(m.group(3)))
+            elif kind == "stick_held":
+                self._ev(i, kind, axis=m.group(1), value=int(m.group(2)), ms=int(m.group(3)), flip=int(m.group(4)))
             return
         m = VERSION.search(line)
         if m and not self.version:
@@ -896,6 +904,8 @@ def area_report(log, area, seg, kind):
         if rep["window"] is not None:
             rep["window"].update(hitches(inside))
             rep["window"]["problems"] = [d["text"] for _, k, d in inside if k == "problem"][:20]
+        # The sticks the host held in the window: what a swept run's request came to (problems_of).
+        rep["sticks_held"] = [{x: d[x] for x in ("axis", "value", "ms", "flip")} for _, k, d in inside if k == "stick_held"]
         rep["frames"] = {}
         for i, k, d in log.between(w1, marks.get("end", end), {"dump"}):
             name = Path(d["path"]).stem
@@ -1946,6 +1956,11 @@ def problems_of(report):
         cp = a.get("capture_pass")
         if cp and cp.get("status") != "ok":
             out.append("%s: %s in the capture pass" % (aid, cp.get("status")))
+        # A swept run's request must have come to a stick held in the window. A host or a probe from
+        # before --sweep ignores it without a problem of its own, and the window is a still one all the
+        # same, recorded as swept (a place with no window has no sticks_held to be empty).
+        if report.get("run", {}).get("sweep") is not None and a.get("sticks_held") == []:
+            out.append("%s: sweep not carried out (host or probe older than --sweep?)" % aid)
         tot = (a.get("lift") or {}).get("totals", {})
         if tot.get("different") or tot.get("invalid"):
             out.append("%s: %d lifted shaders render differently, %d invalid" % (aid, tot.get("different", 0), tot.get("invalid", 0)))
@@ -2235,7 +2250,9 @@ def add_run_options(p):
     p.add_argument("--sweep", nargs="?", type=int, const=SWEEP_VALUE, default=None, metavar="VALUE",
                    help="turn the camera through each window: the right stick's X axis held at VALUE (0-255, 128 is centre; %d "
                         "without one) for the whole measure time, so the camera turns at a steady rate. Off by default; runs made "
-                        "with different sweeps cannot be compared" % SWEEP_VALUE)
+                        "with different sweeps cannot be compared. Needs a bbhost and a probe from the commit that added --sweep "
+                        "or later: older ones ignore it, and a window the host did not hold a stick in is reported as a problem "
+                        "(exit 1)" % SWEEP_VALUE)
     p.add_argument("--env", action="append", default=[], metavar="BBHOST_NAME=VALUE", help="another setting for the game (repeatable)")
     p.add_argument("--keep-data", action="store_true", help="keep each pass's copy of the seed")
     p.add_argument("--keep-captures", action="store_true", help="keep captures whose lift was shown identical (~50 MB each)")

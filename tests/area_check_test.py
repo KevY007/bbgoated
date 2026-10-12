@@ -574,6 +574,54 @@ class LogTest(unittest.TestCase):
         line = mapval("mapval travel-done %s %.3f %s 1.000 2.000 3.000 after %.1f s, %.1f s of it loading", rom.id, 9.0, "20000000", 9.0, 6.5)
         self.assertEqual(ac.Log([line]).events[0][2]["loading_s"], 6.5)
 
+    def test_the_hosts_stick_line_is_an_event(self):
+        """The host's `test: stick ...` line, said when it holds a stick, is an
+        event. Its refusal, a host that does not know the request and the
+        probe's own line (which asks, not confirms) are not."""
+        held = "[bbhost] test: stick rx 182 for 20000 ms at flip 3123"
+        self.assertEqual(ac.Log([held]).events, [(0, "stick_held", {"axis": "rx", "value": 182, "ms": 20000, "flip": 3123})])
+        for line in ("[bbhost] test: stick qx 182 1000: not an axis (lx, ly, rx, ry), a value 0-255 and a hold in ms",
+                     "[bbhost] test: request 000007.req not understood: stick rx",
+                     "[bbhost] plugin: mapval stick rx 182 20000 1791802926.804"):
+            self.assertEqual(ac.Log([line]).events, [], line)
+
+    def test_a_sweep_the_game_did_not_carry_out(self):
+        """A swept run asks for a stick through each window and the host says
+        `test: stick ...` when it holds it. A window without that line - a host
+        or a probe from before --sweep ignores the request, and nothing else
+        says so - is a problem of its own, whatever else the place did; a run
+        that asked for no sweep has nothing to carry out."""
+        cy, rom, hd = (ac.AREA_BY_ID[k] for k in ("central-yharnam", "moonside-lake", "hunters-dream"))
+        win = [[16.7] * 60 for _ in range(4)]
+        held = "[bbhost] test: stick rx 182 for 20000 ms at flip 3123"
+
+        def problems(sweep, cy_window=(), rom_window=(), cy_settle=()):
+            """problems_of a run of three places (the third never reached) with these lines in the windows."""
+            lines = ["[bbhost] plugin: mapval tour-start 100.000"]
+            lines += area_lines(cy, 100.0, "18010000", win, settle_events=cy_settle, window_events=cy_window)
+            lines += area_lines(rom, 160.0, "20000000", win, view=rom.view(), window_events=rom_window)
+            lines.append("[bbhost] plugin: mapval tour-done 220.000")
+            perf = ac.pass_report(lines, [cy, rom, hd], "perf")
+            report = {"run": {"sweep": sweep}, "passes": {"perf": dict(perf)}, "areas": ac.merge(perf, None, None, [cy, rom, hd])}
+            return [p for p in ac.problems_of(report) if not p.startswith("hunters-dream")], perf
+
+        def flagged(aid):
+            return "%s: sweep not carried out (host or probe older than --sweep?)" % aid
+        self.assertEqual(problems(None)[0], [])  # no sweep asked for
+        self.assertEqual(problems(182, [held], [held])[0], [])
+        self.assertEqual(problems(182, [held])[0], [flagged("moonside-lake")])
+        self.assertEqual(problems(182)[0], [flagged("central-yharnam"), flagged("moonside-lake")])
+        # Only the line that holds the stick, and only inside the window, counts.
+        self.assertEqual(problems(182, [], [held], cy_settle=[held])[0], [flagged("central-yharnam")])
+        for other in ("[bbhost] test: stick rx 182 0: not an axis (lx, ly, rx, ry), a value 0-255 and a hold in ms",
+                      "[bbhost] test: request 000007.req not understood: stick rx"):
+            self.assertEqual(problems(182, [other], [held])[0], [flagged("central-yharnam")], other)
+        # The report keeps what the host said, per place with a window.
+        perf = problems(182, [held], [])[1]["areas"]
+        self.assertEqual(perf["central-yharnam"]["sticks_held"], [{"axis": "rx", "value": 182, "ms": 20000, "flip": 3123}])
+        self.assertEqual(perf["moonside-lake"]["sticks_held"], [])
+        self.assertNotIn("sticks_held", perf["hunters-dream"])
+
     def test_capture_pass(self):
         cy = ac.AREA_BY_ID["central-yharnam"]
         lines = area_lines(cy, 10.0, "18010000", [], kind="capture", captures=["8747a367+a22c7f71", "1234abcd+6c5edb96"])
@@ -957,6 +1005,19 @@ for line in tour:
         p.write_bytes(b"P6\n8 8\n255\n" + b"".join(bytes([100]) * 12 + bytes([255]) * 12 if y < 4 else bytes([255]) * 24 for y in range(8)))
         (Path("build") / "frame-1000.ppm").write_bytes(b"P6\n1 1\n255\n" + bytes(3))  # BBHOST_DUMP_FRAME's own, under the cwd
         log("test: frame dump at flip %d to %s" % (flip, p))
+    elif w[0] == "stick":
+        # The probe asks and the host holds the stick and says so. A host from before --sweep
+        # (BBHOST_STANDIN_STICK=old-host) does not know the request; a probe from before it
+        # (old-probe) never asks and logs the step as a line it cannot read.
+        mode = os.environ.get("BBHOST_STANDIN_STICK", "")
+        if mode == "old-probe":
+            log("plugin: mapval: bad tour line: " + line)
+        else:
+            log("mapval stick %s %s %s %.3f" % (w[1], w[2], w[3], t))
+            if mode == "old-host":
+                log("test: request %06d.req not understood: stick %s" % (step, w[1]))
+            else:
+                log("test: stick %s %s for %s ms at flip %d" % (w[1], w[2], w[3], flip))
     elif w[0] == "capture" and int(w[1]) > 0:
         for k in range(min(2, int(w[1]))):
             d = captures / w[2] / ("%04x+%08x-f%d-d%d" % (k, 0xa0000000 + step * 16 + k, flip, k))
@@ -1108,6 +1169,30 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual(self.compare_runs("s1", b, "ab-s1-" + b), 2)
             self.assertIn("camera sweeps differ", self.stderr)
             self.assertFalse((self.d / ("ab-s1-" + b)).exists())
+
+    def test_a_sweep_the_game_did_not_carry_out_through_a_run(self):
+        """The stand-in game holds the stick and says so, or is a host from
+        before --sweep (it does not know the request) or has a probe from
+        before it (it logs the step as a line it cannot read). A swept run of
+        either of the last two exits 1 and says, place by place, that the sweep
+        was not carried out - the run's own record says it was swept, so
+        nothing else would; asked for no sweep, the same game is fine."""
+        self.assertEqual(self.run_once("held", "--sweep", "--captures", "0"), 0)
+        rep = json.loads((self.d / "held" / "report.json").read_text())
+        self.assertEqual(rep["problems"], [])
+        for aid in ("central-yharnam", "moonside-lake"):  # --measure 6: the stick for 6000 ms
+            self.assertEqual([(h["axis"], h["value"], h["ms"]) for h in rep["areas"][aid]["sticks_held"]], [("rx", ac.SWEEP_VALUE, 6000)])
+        want =["%s: sweep not carried out (host or probe older than --sweep?)" % p for p in ("central-yharnam", "moonside-lake")]
+        for mode in ("old-host", "old-probe"):
+            self.assertEqual(self.run_once(mode, "--sweep", "--captures", "0", "--env", "BBHOST_STANDIN_STICK=" + mode), 1, mode)
+            rep = json.loads((self.d / mode / "report.json").read_text())
+            self.assertEqual(rep["run"]["sweep"], ac.SWEEP_VALUE)
+            self.assertEqual(rep["problems"], want, mode)
+            self.assertEqual(rep["areas"]["central-yharnam"]["sticks_held"], [])
+            self.assertEqual(rep["areas"]["central-yharnam"]["status"], "ok")  # the place itself was measured
+            self.assertIn("problem: " + want[0], (self.d / mode / "summary.txt").read_text())
+        # Not asked for: whatever the game does with the step, there is none.
+        self.assertEqual(self.run_once("still", "--captures", "0", "--env", "BBHOST_STANDIN_STICK=old-host"), 0)
 
 
 if __name__ == "__main__":
