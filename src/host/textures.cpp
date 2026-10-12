@@ -2,6 +2,7 @@
 // stage's user data become Vulkan images (untiled on upload) and samplers.
 // Render targets sampled as textures alias the render target image.
 #include "host/gpu_internal.h"
+#include "host/perf/vk/barrier_masks.h"
 #include "host/perf/vk/fold_clears.h"
 
 #if !defined(_WIN32)
@@ -2006,7 +2007,14 @@ VkImageView rt_region_view(RtImage& rt, const std::uint32_t* w, std::uint32_t wi
 }
 
 void record_region_copy(VkCommandBuffer cmd, VkImage src, VkImage dst, std::uint32_t width, std::uint32_t height, bool dst_initialised) {
-    const auto barrier = [cmd](VkImage img, VkImageLayout from, VkAccessFlags src_access, VkAccessFlags dst_access) {
+    // bbgoated (host/perf/vk/barrier_masks.h, BBHOST_BBG_PRECISE_BARRIERS): the region image is only ever sampled; the
+    // last barrier also holds back what next writes the target the copy read (its pass, a clear). The switch is a
+    // static read once, so the recorder thread replaying DrawCmds::copy_region may read it.
+    const bool precise = precise_barriers();
+    const VkPipelineStageFlags all = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    const VkPipelineStageFlags shaders = bbg_shader_stages(g.has_tessellation), users = bbg_target_users(g.has_tessellation);
+    const auto barrier = [cmd](VkImage img, VkImageLayout from, VkAccessFlags src_access, VkAccessFlags dst_access, VkPipelineStageFlags src_stages,
+                               VkPipelineStageFlags dst_stages) {
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         b.oldLayout = from;
         b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -2015,17 +2023,19 @@ void record_region_copy(VkCommandBuffer cmd, VkImage src, VkImage dst, std::uint
         b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         b.srcAccessMask = src_access;
         b.dstAccessMask = dst_access;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+        vkCmdPipelineBarrier(cmd, src_stages, dst_stages, 0, 0, nullptr, 0, nullptr, 1, &b);
     };
     barrier(src, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
-            VK_ACCESS_TRANSFER_READ_BIT);
-    barrier(dst, dst_initialised ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            VK_ACCESS_TRANSFER_READ_BIT, precise ? users : all, precise ? VK_PIPELINE_STAGE_TRANSFER_BIT : all);
+    barrier(dst, dst_initialised ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            precise ? shaders | VK_PIPELINE_STAGE_TRANSFER_BIT : all, precise ? VK_PIPELINE_STAGE_TRANSFER_BIT : all);
     VkImageCopy r{};
     r.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     r.dstSubresource = r.srcSubresource;
     r.extent = {width, height, 1};
     vkCmdCopyImage(cmd, src, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
-    barrier(dst, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+    barrier(dst, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, precise ? VK_PIPELINE_STAGE_TRANSFER_BIT : all,
+            precise ? users : all);
 }
 
 // The target's top-left width x height copied into an image of its own, made

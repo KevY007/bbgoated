@@ -10,6 +10,7 @@
 #include "host/dlaa.h"
 #include "host/gpu_internal.h"
 #include "host/perf/vk/async_skip.h"
+#include "host/perf/vk/barrier_masks.h"
 #include "host/perf/vk/fold_clears.h"
 #include "host/shader_patch.h"
 #include "host/tess_lds.h"
@@ -6705,8 +6706,10 @@ void clear_depth(RtImage& r, bool depth, bool stencil, float dval, std::uint32_t
     rec().clear_depth_stencil_image(r.image, VK_IMAGE_LAYOUT_GENERAL, v, 1, &range);
     VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    rec().pipeline_barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    // bbgoated (host/perf/vk/barrier_masks.h, BBHOST_BBG_PRECISE_BARRIERS): what uses a depth target waits, not all commands.
+    mb.dstAccessMask = precise_barriers() ? kBbgDepthConsumerAccess : (VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+    rec().pipeline_barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, precise_barriers() ? bbg_depth_consumers(g.has_tessellation) : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                           0, 1, &mb, 0, nullptr, 0, nullptr);
     g_clears.fetch_add(1);
 }
 
@@ -7325,10 +7328,14 @@ void copy_layers_locked(const RtImage& from, RtImage& to) {
     begin_recording_locked();
     render_end_pass_locked();
     ensure_initialised(to);
+    // bbgoated (host/perf/vk/barrier_masks.h, BBHOST_BBG_PRECISE_BARRIERS): what uses targets is waited for, and what
+    // uses `to`'s kind waits (`from` is retired: nothing writes it after the copy).
+    const bool precise = precise_barriers();
     VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
     mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-    rec().pipeline_barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    rec().pipeline_barrier(precise ? bbg_target_users(g.has_tessellation) : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
+                           &mb, 0, nullptr, 0, nullptr);
     const std::uint32_t layers = std::min(from.layers, to.layers);
     VkImageCopy region{};
     region.srcSubresource = {aspect_of(from), 0, 0, layers};
@@ -7337,7 +7344,12 @@ void copy_layers_locked(const RtImage& from, RtImage& to) {
     rec().copy_image(from.image, VK_IMAGE_LAYOUT_GENERAL, to.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
     mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    rec().pipeline_barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    VkPipelineStageFlags dst_stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    if (precise) {
+        mb.dstAccessMask = to.depth ? kBbgDepthConsumerAccess : kBbgColorConsumerAccess;
+        dst_stages = to.depth ? bbg_depth_consumers(g.has_tessellation) : bbg_color_consumers(g.has_tessellation);
+    }
+    rec().pipeline_barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, dst_stages, 0, 1, &mb, 0, nullptr, 0, nullptr);
 }
 
 }  // namespace
@@ -7525,7 +7537,12 @@ void clear_image_record_locked(RtImage& r, const float rgba[4], std::uint32_t fi
     VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    rec().pipeline_barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    VkPipelineStageFlags dst_stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    if (precise_barriers()) {  // bbgoated (host/perf/vk/barrier_masks.h, BBHOST_BBG_PRECISE_BARRIERS): what uses this kind of target waits
+        mb.dstAccessMask = r.depth ? kBbgDepthConsumerAccess : kBbgColorConsumerAccess;
+        dst_stages = r.depth ? bbg_depth_consumers(g.has_tessellation) : bbg_color_consumers(g.has_tessellation);
+    }
+    rec().pipeline_barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, dst_stages, 0, 1, &mb, 0, nullptr, 0, nullptr);
     g_clears.fetch_add(1);
 }
 
@@ -8358,10 +8375,15 @@ bool record_target_copy_locked(RtImage& src, RtImage& dst, std::uint32_t width, 
     VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     // A depth plane into a snapshot made for it: one compute pass.
     const bool by_compute = from_depth && dst.storage && depth_copy_available_locked();
+    // bbgoated (host/perf/vk/barrier_masks.h, BBHOST_BBG_PRECISE_BARRIERS): what uses targets is waited for; after the
+    // copy, what uses targets waits - `src` too, read here, whose next pass or clear writes it - with dst's access.
+    const bool precise = precise_barriers();
+    const VkPipelineStageFlags users = precise ? bbg_target_users(g.has_tessellation) : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    const VkAccessFlags after = precise ? kBbgColorConsumerAccess : (VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
     mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
     mb.dstAccessMask = by_compute ? VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-    rec().pipeline_barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         by_compute ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    rec().pipeline_barrier(users, by_compute ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0,
+                           nullptr);
     // BBHOST_GPU_PROFILE: the copy as an entry of its own, by kind and size.
     static std::map<std::string, std::string> copy_names;
     if (g.profile) {
@@ -8373,9 +8395,8 @@ bool record_target_copy_locked(RtImage& src, RtImage& dst, std::uint32_t width, 
     if (by_compute && depth_copy_record_locked(src.image, src.format, dst.image, width, height)) {
         if (g.profile) profile_end_locked();
         mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-        rec().pipeline_barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0,
-                             nullptr);
+        mb.dstAccessMask = after;
+        rec().pipeline_barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, users, 0, 1, &mb, 0, nullptr, 0, nullptr);
         if (g_pending_clears.erase(dst.base)) ++g_pending_gen;
         dst.fill_last = false;
         g_rt_copies.fetch_add(1);
@@ -8384,7 +8405,7 @@ bool record_target_copy_locked(RtImage& src, RtImage& dst, std::uint32_t width, 
     if (by_compute) {
         // The pass could not be recorded: the buffer copies, behind the transfer barrier they expect.
         mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-        rec().pipeline_barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        rec().pipeline_barrier(users, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
     }
     if (from_depth) {
         // Depth and colour formats cannot be copied image-to-image: go through a
@@ -8429,8 +8450,8 @@ bool record_target_copy_locked(RtImage& src, RtImage& dst, std::uint32_t width, 
     }
     if (g.profile) profile_end_locked();
     mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    rec().pipeline_barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    mb.dstAccessMask = after;
+    rec().pipeline_barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, users, 0, 1, &mb, 0, nullptr, 0, nullptr);
     if (g_pending_clears.erase(dst.base)) ++g_pending_gen;
     dst.fill_last = false;
     g_rt_copies.fetch_add(1);
