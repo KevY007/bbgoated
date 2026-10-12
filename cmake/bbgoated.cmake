@@ -52,3 +52,13 @@ if(Vulkan_FOUND)
   target_sources(bbhost PRIVATE src/host/dlaa.cpp)
   set_source_files_properties(src/host/dlaa.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
 endif()
+
+# DLAA and the game's own anti-aliasing (host/dlaa_aa.*), tested on its own.
+if(Vulkan_FOUND)
+  target_sources(bbhost PRIVATE src/host/dlaa_aa.cpp)
+endif()
+if(TARGET config_test)
+  add_executable(dlaa_aa_test tests/dlaa_aa_test.cpp src/host/dlaa_aa.cpp)
+  target_include_directories(dlaa_aa_test PRIVATE src)
+  add_test(NAME dlaa_aa_test COMMAND dlaa_aa_test)
+endif()

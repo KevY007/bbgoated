@@ -1624,6 +1624,7 @@ bool host_window_pump() {
     SDL_GetWindowSize(g_window, &win_w, &win_h);
     SDL_GetWindowSizeInPixels(g_window, &px_w, &px_h);
     const float pixel_ratio = win_w > 0 ? static_cast<float>(px_w) / static_cast<float>(win_w) : 1.0f;
+    gpu::dlaa_aa_tick();  // bbgoated: the game's anti-aliasing off while DLAA runs
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         // F10's screen keeps its keys; the plugin menu takes the rest while open.

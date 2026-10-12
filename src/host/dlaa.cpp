@@ -1,5 +1,7 @@
 // See dlaa.h.
 #include "host/dlaa.h"
+#include "host/dlaa_aa.h"
+#include "host/options.h"
 
 #include "core/config.h"
 #include "hle/modules.h"
@@ -49,6 +51,10 @@ typedef void (*PFN_ngxb_release)(void);
 }
 
 namespace gpu {
+
+// NGX's result, for the window thread (bbgoated's anti-aliasing coupling).
+std::atomic<bool> g_dlaa_ngx_ok{false};
+
 namespace {
 
 [[maybe_unused]] constexpr int kBridgeVersion = 1;  // this and ngx_log: Windows only
@@ -415,6 +421,7 @@ bool init_ngx_locked() {
     const std::uint32_t r = g_bridge.init(g.instance, g.phys, g.device, vkGetInstanceProcAddr, vkGetDeviceProcAddr, dll_dir.c_str(),
                                           data_dir.c_str(), &ngx_log);
     g_s.ngx_ok = !ngx_failed(r);
+    g_dlaa_ngx_ok.store(g_s.ngx_ok, std::memory_order_release);
     host_log("dlaa: NGX init %s (0x%08x)%s", g_s.ngx_ok ? "ok" : "failed", r,
              g_s.ngx_ok ? "" : " - needs an NVIDIA RTX GPU and nvngx_dlss.dll beside bbhost.exe; the game renders unchanged");
 #endif
@@ -614,6 +621,12 @@ void dlaa_add_device_extensions(VkPhysicalDevice phys, std::vector<const char*>&
     std::vector<VkExtensionProperties> avail(n);
     vkEnumerateDeviceExtensionProperties(phys, nullptr, &n, avail.data());
     for (std::uint32_t i = 0; i < nd; ++i) add_missing(exts, dev[i], avail, "device");
+    // bbgoated (as FIocker's PR #73): the renderer enables Vulkan 1.2's core
+    // bufferDeviceAddress, and NGX's list also names the pre-core EXT version;
+    // enabling both breaks the device-creation rules. NGX uses the core entry.
+    exts.erase(std::remove_if(exts.begin(), exts.end(),
+                              [](const char* name) { return !std::strcmp(name, "VK_EXT_buffer_device_address"); }),
+               exts.end());
 }
 
 // The first post-process draw: YEBIS's copy of the lit HDR scene (RGBA16F, the
@@ -991,6 +1004,41 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
                  jy, static_cast<unsigned long long>(g_s.jittered_draws));
         g_s.jittered_draws = 0;
     }
+}
+
+}  // namespace gpu
+
+
+namespace gpu {
+
+bool dlaa_running() {
+    return config_on() && g_dlaa_ngx_ok.load(std::memory_order_acquire) && g_s.enabled.load(std::memory_order_relaxed);
+}
+
+// bbgoated: the window thread, every pump. While DLAA runs, the game's own
+// anti-aliasing is held off; it comes back when DLAA is turned off, if the
+// player had it on (host/dlaa_aa.h). Looked at only when DLAA or a setting changed.
+void dlaa_aa_tick() {
+    static DlaaAaState state;
+    static bool last_active = false;
+    static std::uint64_t last_serial = 0;
+    const bool active = dlaa_running();
+    const std::uint64_t serial = host_opt_serial();
+    if (active == last_active && serial == last_serial) return;
+    last_active = active;
+    switch (dlaa_aa_step(&state, active, host_opt_get("anti_alias"))) {
+    case kDlaaAaTurnOff:
+        host_opt_set("anti_alias", false);
+        host_log("dlaa: the game's anti-aliasing is off while DLAA runs (it comes back when DLAA is turned off)");
+        break;
+    case kDlaaAaTurnOn:
+        host_opt_set("anti_alias", true);
+        host_log("dlaa: the game's anti-aliasing is back on (DLAA off)");
+        break;
+    case kDlaaAaKeep:
+        break;
+    }
+    last_serial = host_opt_serial();  // our own change is not news
 }
 
 }  // namespace gpu
