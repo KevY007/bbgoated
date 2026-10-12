@@ -9,12 +9,12 @@ the commits end with the controller's `Claude-Session` line, as README rule 5 as
 | Repo | Branch | From | Commits |
 |---|---|---|---|
 | KevY007/bbgoated | `cloud/task-2-port-map` | `cloud/task-R-rebase` ebb97dc (9cc8dc0 + task R's report) | 48f5145 `bbg/docs: PR #73 port map - what is taken, left out and resolved`; then this report with `task-2-dryrun.py` |
-| KevY007/bbgoated-workspace | `cloud/task-2-port-map` | `main` 6bb335e | 4c5252f `pr73_hunks.py: PR #73's hunks of one file as a patch for git apply --3way, with its test` |
+| KevY007/bbgoated-workspace | `cloud/task-2-port-map` | `main` 07bd5c3 | 2da0e18 `pr73_hunks.py: PR #73's hunks of one file as a patch for git apply --3way, with its test` |
 
 - Code repo ctest (Linux, upstream's `tools/ci_build.sh`, `-DBBGOATED=ON`) on 48f5145:
   `100% tests passed, 0 tests failed out of 60` (37 ran, 23 skipped: they need the game files or
   the game's libc). The code repo change is documentation only.
-- Workspace tests: `test_pr73_hunks.py` 11 OK; all four `scripts/tests/test_*.py` files OK (19 tests).
+- Workspace tests: `test_pr73_hunks.py` 11 OK; all four `scripts/tests/test_*.py` files OK (28 tests).
 - `check-online-untouched.ps1` (task R's version, PowerShell 7.4.6): `online paths untouched since
   566184a (1 upstream cherry-picks allowed)`. No NVIDIA runtime, DLSS SDK or FSR 4 model file is tracked.
 
@@ -140,10 +140,11 @@ the commits end with the controller's `Claude-Session` line, as README rule 5 as
 14. Ruling: section E's commands write patches with `git diff <c>~1 <c> --output=<patch>` rather than
     `git show | git apply`. - A PowerShell 5.1 pipe re-encodes text (the plan's own warning about `>`).
     - Cost if wrong: none; both forms produce the same patch (checked).
-15. Ruling: the workspace branch was rebased onto main 6bb335e (Phase 2 Task 1 tooling and the P3A/P3B
-    briefs landed after I branched from 2ddc62f) and force-pushed with a lease on my own commit; the
-    code branch was moved onto task R's ebb97dc before its first commit. - Both are my branches; each
-    now fast-forwards. - Cost if wrong: none.
+15. Ruling: the workspace branch was rebased onto main as main moved during the run (6bb335e: Phase 2
+    Task 1 tooling and the P3A/P3B briefs; then 07bd5c3: task R's check-script commits and the
+    vvl-summary update) and force-pushed with a lease on my own commit; the code branch was moved onto
+    task R's ebb97dc before its first commit. - Both are my branches; the workspace one fast-forwards
+    main. - Cost if wrong: none.
 16. Ruling: the cloud machine got `mesa-vulkan-drivers` (lavapipe) besides upstream's CI package list,
     so the Vulkan unit tests ran on the CPU (`dlaa_motion_test`, `gcn_sampling_test`,
     `indirect_clamp_test`); task R's machine skipped 25 tests, this one 23. PowerShell 7.4.6 was
@@ -407,7 +408,7 @@ from the built ones (928e83d, and dc6b7db less its test registrations) in docs o
 | this branch 48f5145 (before the report commit; the report adds docs only) | the same | `100% tests passed, 0 tests failed out of 60`, 37 ran, 23 skipped |
 | scratch tree after (a2) | `cmake -G Ninja ... -DBBGOATED=ON && cmake --build && ctest` | `100% tests passed, 0 tests failed out of 63` |
 | scratch tree after (d) | the same, incremental | `100% tests passed, 0 tests failed out of 66` |
-| workspace | `python3 -I scripts/tests/test_<x>.py` for each of the four | OK, OK, OK, OK (2 + 11 + 3 + 3 tests) |
+| workspace (on main 07bd5c3) | `python3 -I scripts/tests/test_<x>.py` for each of the four | OK, OK, OK, OK (2 + 11 + 3 + 12 tests) |
 
 The 23 skipped: debug_menu_strings_test, libc_native_test, decomp_insn_eboot,
 decomp_event_interpreter, decomp_player_data, decomp_item_lots, decomp_talk_evaluator,
