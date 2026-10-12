@@ -38,6 +38,26 @@ if(TARGET config_test)
   add_test(NAME stage_share_test COMMAND stage_share_test)
 endif()
 
+# bbgoated performance switches (docs/bbgoated/SWITCHES.md): every source in
+# src/host/perf - its renderer glue (perf/vk) only with Vulkan - so a switch's
+# task adds files without editing this one. Their pure parts are header-only
+# (src/host/perf/core/*.h), each with a test: tests/bbg_<name>_test.cpp.
+file(GLOB BBG_PERF_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/host/perf/*.cpp)
+target_sources(bbhost PRIVATE ${BBG_PERF_SOURCES})
+if(Vulkan_FOUND)
+  file(GLOB BBG_PERF_VK_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/host/perf/vk/*.cpp)
+  target_sources(bbhost PRIVATE ${BBG_PERF_VK_SOURCES})
+endif()
+if(TARGET config_test)
+  file(GLOB BBG_PERF_TESTS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/bbg_*_test.cpp)
+  foreach(t ${BBG_PERF_TESTS})
+    get_filename_component(n ${t} NAME_WE)
+    add_executable(${n} ${t})
+    target_include_directories(${n} PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME ${n} COMMAND ${n})
+  endforeach()
+endif()
+
 # The red-zone audit's site table (host/redzone_audit.*), tested on its own.
 if(TARGET config_test AND BBGOATED)
   add_executable(redzone_audit_test tests/redzone_audit_test.cpp src/host/redzone_audit.cpp)

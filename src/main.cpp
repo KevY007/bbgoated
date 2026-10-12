@@ -1,5 +1,6 @@
 #include "engine/frame_pool.h"
 #include "host/bbgoated.h"
+#include "host/perf/bbg_perf.h"
 #include "host/redzone_audit.h"
 #include "engine/key_prompts.h"
 #include "decomp/decomp.h"
@@ -935,6 +936,7 @@ int main(int argc, char** argv) {
 #if defined(BBHOST_BBGOATED)
     bbgoated_warn_other_instances();
     redzone_audit_install();  // BBHOST_REDZONE_AUDIT=1; registered after the write watch's, so it sees the faults first
+    bbg::perf_init();         // BBHOST_BBG_PERF and [perf] into the environment, before the GPU starts (host/perf/bbg_perf.h)
 #endif
 #if defined(BBHOST_HAVE_SDL3)
     {
