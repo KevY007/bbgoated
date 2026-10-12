@@ -35,6 +35,16 @@ Rows: upstream SHA | picked SHA | source | reason. Column 1 is plain text on pur
 | 94db371 | 00d3cd8 | upstream PR #70 (open) | chromatic aberration toggle works on Windows (the user's log: "cannot place chromatic aberration's stub"); the PR's head rebased onto 566184a, the same change as e57427b |
 | 0b0ea89 | f171529 | upstream PR #117 (open) | dispatch-trace records only inside the coverage window (~14 MiB/min leak in v0.2.18); the PR's head rebased onto 566184a, the same change as 021112f |
 
+## Ported (not cherry-picked)
+
+Pieces of unmerged work re-applied as bbgoated commits (`bbg/upscale:`), with the record of what was taken in `docs/bbgoated/pr73-port.md`. Column 1 is plain text, so `check-online-untouched.ps1` and `sync-upstream.ps1` do not read these rows.
+
+| Source | bbgoated commit | What | Left out |
+|---|---|---|---|
+| upstream-pr/73 at 539d45f (on 566184a) | (filled by Tasks 3-7) | | frame generation (85d81a9's rows included), Reflex, presenter/frame-loop timing (pr73-port.md table B) |
+
+The DLAA fork's picks above (ae0b56f, 8e42461, in the tracked refs) give way to PR #73's versions of the same files when (a1) and (a2) land: pr73-port.md, section E.
+
 ## Upstream behaviour bbgoated changes by default
 
 | Upstream commit | What it does | Found | bbgoated |
