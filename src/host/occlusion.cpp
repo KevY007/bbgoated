@@ -425,6 +425,11 @@ void occlusion_draw_locked(DrawCall& call) {
     }
 }
 
+// bbgoated (host/perf/vk/async_skip.cpp, BBHOST_BBG_ASYNC_SKIP): the next draw would get a query - one of the
+// draws after a dump, up to its cap, which the game may be measuring. (The interval stays open from the first
+// dump on; a draw past the cap, or one that is not drawn, makes it unmeasured, which reads visible.)
+bool occlusion_interval_open_locked() { return g_on && g_iv.open && g_iv.queries < g_iv.cap; }
+
 void occlusion_submit_locked() {
     if (!g_on) return;
     resolve_locked(false);
