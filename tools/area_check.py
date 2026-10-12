@@ -30,11 +30,22 @@ staircase up to the Nightmare Grand Cathedral. The Old Hunters' places need
 its patch on (bbhost's default; the run's config says so when they are
 listed).
 
-That is the perf pass. The capture pass visits the same places and, after the
-settle, lets BBHOST_CAPTURE_DRAW=*ps take the first draw of up to --captures
-pixel shaders (6) not captured before; tools/lift_verify.py then replays each
-with its lift and with its translation and compares the outputs byte for byte.
-Captures stall the GPU, which is why they get a session of their own.
+That is the perf pass. --sweep [VALUE] (off by default) turns the camera
+through its window: right after the window's mark the probe asks the host to
+hold the right stick's X axis at VALUE (0-255, 128 is centre; 182 without one,
+a steady 12 degrees a second: 238 through the 20 s window) for the measure
+time, so the camera turns at a steady rate and stops at the window's end. A
+place is then seen from many sides, the frame times follow what the camera
+faces, and the same turn is made in every run; the frames are taken where the
+camera stopped. A swept window is not a still one: `compare` refuses runs whose
+sweeps differ.
+
+The capture pass visits the same places and, after the settle, lets
+BBHOST_CAPTURE_DRAW=*ps take the first draw of up to --captures pixel shaders
+(6) not captured before; tools/lift_verify.py then replays each with its lift
+and with its translation and compares the outputs byte for byte. Captures
+stall the GPU, which is why they get a session of their own, and need a still
+view: the capture pass never sweeps.
 
 Per place the report gives, for the window: fps and the exact frame-time
 percentiles (BBHOST_FRAME_DETAIL=1: every flip interval), the GPU busy meter
@@ -235,15 +246,27 @@ def pick_areas(spec):
 
 # --- the plan -------------------------------------------------------------------
 
+# --sweep without a value: the right stick's X axis (0-255; the stick rests at
+# about 128) held at this through the window. Measured on the game, the same at
+# the 30, 60 and 120 fps settings: the camera does not turn up to a dead zone
+# that ends at 175, then turns 1.62 degrees a second for each step above it
+# (176: 2 degrees a second, 180: 9, 192: 28, 224: 80), and a full stick (255)
+# spins at 260. 182 is 11.9 degrees a second: 238 degrees through a 20 s window,
+# a steady pan that ends facing another way; two runs ended 0.04 degrees apart.
+SWEEP_VALUE = 182
+
 DEFAULTS = {"settle": 15.0, "measure": 20.0, "dumps": 2, "dump_gap": 2.0, "quiet": QUIET_RADIUS, "start": 8.0, "fps": 60,
-            "captures": 6, "capture_settle": 10.0, "capture_window": 30.0}
+            "captures": 6, "capture_settle": 10.0, "capture_window": 30.0, "sweep": None}
 
 
 def tour(areas, opts, kind):
     """The probe's tour (tools/mapval_plugin.c steps) for one pass: 'perf' or 'capture'.
 
     Each place starts with its travel - the step a failed travel skips to the
-    next of - so the log splits into places at the travel lines."""
+    next of - so the log splits into places at the travel lines. With a sweep
+    (opts["sweep"], the stick value; None: still) the perf pass holds the right
+    stick over for the measure time from the window's mark, so the camera turns
+    steadily through the window; the capture pass needs a still view."""
     lines = ["# area_check %s pass: %d places" % (kind, len(areas))]
     for a in areas:
         lines.append("# %s: %s" % (a.id, a.name))
@@ -260,6 +283,8 @@ def tour(areas, opts, kind):
             if opts["quiet"] > 0:
                 lines.append("quiet %.0f" % opts["quiet"])
             lines.append("mark %s:measure" % a.id)
+            if opts["sweep"] is not None:
+                lines.append("stick rx %d %d" % (opts["sweep"], round(opts["measure"] * 1000)))
             lines.append("hold %.1f" % opts["measure"])
             lines.append("mark %s:measured" % a.id)
             for k in range(opts["dumps"]):
@@ -1412,13 +1437,19 @@ def fmt(v, spec="%.1f"):
     return "-" if v is None else spec % v
 
 
+def sweep_text(sweep):
+    """A run's camera sweep (the stick value; None: still) as the summary says it."""
+    return "off" if sweep is None else "right stick %d" % sweep
+
+
 def summary_text(report):
     """The run's report to read."""
     run = report.get("run", {})
     out = ["area check: %s" % report.get("dir", ""),
            "build %s (%s), sha256 %s" % (run.get("version") or "?", run.get("bbhost"), (run.get("bbhost_sha256") or "?")[:16]),
-           "pinned to NUMA node %s; %s fps; pipeline cache %s; started %s" % (
-               run.get("numa_node"), run.get("fps"), "seed's" if run.get("pipeline_cache") else "off", run.get("started_utc"))]
+           "pinned to NUMA node %s; %s fps; pipeline cache %s; camera sweep %s; started %s" % (
+               run.get("numa_node"), run.get("fps"), "seed's" if run.get("pipeline_cache") else "off", sweep_text(run.get("sweep")),
+               run.get("started_utc"))]
     for kind in ("perf", "capture"):
         p = report.get("passes", {}).get(kind)
         if p:
@@ -1965,9 +1996,11 @@ def resolve_options(args):
                  "pipeline_cache": args.pipeline_cache == "seed", "p2p_port": args.p2p_port, "width": args.width,
                  "height": args.height, "env": args.env, "keep_data": args.keep_data, "keep_captures": args.keep_captures,
                  "numa_node": numa, "seed": str(seed), "window": parse_window(getattr(args, "windowed", None)),
-                 "probe_arg": getattr(args, "probe", None)})
+                 "probe_arg": getattr(args, "probe", None), "sweep": getattr(args, "sweep", None)})
     if opts["measure"] < 5 or opts["settle"] < 0 or opts["dumps"] < 0 or opts["dumps"] > 8 or opts["captures"] < 0:
         raise ValueError("--measure must be 5 s or more, --settle and --captures not negative, --dumps 0-8")
+    if opts["sweep"] is not None and not 0 <= opts["sweep"] <= 255:
+        raise ValueError("--sweep takes a stick value, 0-255: %d" % opts["sweep"])
     return areas, {"app0": str(Path(app0).resolve()), "eboot": str(Path(eboot).resolve())}, opts
 
 
@@ -2043,7 +2076,8 @@ def do_run(args, bbhost=None, out=None, captures=True, say=print):
         "bbhost": opts["bbhost"], "bbhost_sha256": plan["bbhost_sha256"], "numa_node": opts["numa_node"], "fps": opts["fps"],
         "pipeline_cache": opts["pipeline_cache"], "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "platform": platform.platform(), "load_before": os.getloadavg() if hasattr(os, "getloadavg") else None,
-        "settle_s": opts["settle"], "measure_s": opts["measure"], "size": [opts["width"], opts["height"]]}, "passes": {}}
+        "settle_s": opts["settle"], "measure_s": opts["measure"], "size": [opts["width"], opts["height"]],
+        "sweep": opts["sweep"]}, "passes": {}}
     passes, lifts = {}, None
     for k in kinds:
         t0 = time.monotonic()
@@ -2110,11 +2144,25 @@ def load_report(run):
     return rep
 
 
+def check_same_sweep(reports):
+    """Runs are compared only if their cameras were swept alike: a swept window
+    and a still one, or two sweeps at different values, are not the same
+    measurement. A report from before --sweep was a still run."""
+    by_sweep = {}
+    for r in reports:
+        by_sweep.setdefault((r.get("run") or {}).get("sweep"), []).append(r["dir"])
+    if len(by_sweep) > 1:
+        raise ValueError("the runs' camera sweeps differ (%s): a swept window and a still one are not the same measurement; "
+                         "compare runs made with the same --sweep" % "; ".join(
+                             "%s: %s" % (sweep_text(s), ", ".join(dirs)) for s, dirs in by_sweep.items()))
+
+
 def do_compare(a_dirs, b_dirs, out, say=print):
-    out = Path(out).resolve()
-    out.mkdir(parents=True, exist_ok=True)
     a = [load_report(d) for d in a_dirs]
     b = [load_report(d) for d in b_dirs]
+    check_same_sweep(a + b)
+    out = Path(out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
     ids = list(dict.fromkeys(k for r in a + b for k in r.get("areas", {})))
     frames = compare_frames(a_dirs, b_dirs, ids, out)
     ab = compare_reports(a, b, frames)
@@ -2184,6 +2232,10 @@ def add_run_options(p):
     p.add_argument("--windowed", metavar="WxH", help="a visible window of this size instead of headless (the game still renders "
                    "at --width x --height): for what depends on the window, the light grid's tiles among it")
     p.add_argument("--probe", help="a prebuilt probe plugin; required on Windows (scripts/build.ps1 -Probe: probe/mapval.dll)")
+    p.add_argument("--sweep", nargs="?", type=int, const=SWEEP_VALUE, default=None, metavar="VALUE",
+                   help="turn the camera through each window: the right stick's X axis held at VALUE (0-255, 128 is centre; %d "
+                        "without one) for the whole measure time, so the camera turns at a steady rate. Off by default; runs made "
+                        "with different sweeps cannot be compared" % SWEEP_VALUE)
     p.add_argument("--env", action="append", default=[], metavar="BBHOST_NAME=VALUE", help="another setting for the game (repeatable)")
     p.add_argument("--keep-data", action="store_true", help="keep each pass's copy of the seed")
     p.add_argument("--keep-captures", action="store_true", help="keep captures whose lift was shown identical (~50 MB each)")

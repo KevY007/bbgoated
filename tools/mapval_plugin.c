@@ -48,7 +48,11 @@
  *     capture <n> [<name>]                    let BBHOST_CAPTURE_DRAW take up to n
  *                                             draws, into
  *                                             $BBHOST_MAPVAL_CAPTURES/<name>; 0 stops
- * (the last two ask the host through BBHOST_TEST_REQUESTS, hle/video.cpp).
+ *     stick <axis> <value> <ms>               hold a stick (lx, ly, rx or ry) at
+ *                                             value (0-255, about 128 at rest) for
+ *                                             ms; held on the right stick's X axis
+ *                                             the follow camera turns, steadily
+ * (the last three ask the host through BBHOST_TEST_REQUESTS, hle/video.cpp).
  * Each step logs what it did with the time, so the dataset script can find
  * the play-log samples of the same seconds. While a warp or kill step runs
  * the player's HP is kept full (the seed stands among enemies).
@@ -100,7 +104,7 @@ static double loading_t0;  /* when the screen came up */
 
 /* --- the tour ------------------------------------------------------------ */
 
-enum { S_WARP, S_KILL, S_FALL, S_WAIT, S_TRAVEL, S_WALK, S_HOLD, S_MARK, S_CAMERA, S_QUIET, S_DUMP, S_CAPTURE };
+enum { S_WARP, S_KILL, S_FALL, S_WAIT, S_TRAVEL, S_WALK, S_HOLD, S_MARK, S_CAMERA, S_QUIET, S_DUMP, S_CAPTURE, S_STICK };
 typedef struct {
     int kind;
     char name[64];
@@ -185,6 +189,8 @@ static void load_tour(const char* path) {
             s.kind = S_CAPTURE; /* team: the draws */
             if (sscanf(line, "%*s %*d %63s", s.name) != 1) s.name[0] = 0;
         }
+        else if (!strcmp(kind, "stick") && sscanf(line, "%*s %63s %d %f", s.name, &s.team, &s.hold) == 3)
+            s.kind = S_STICK; /* name: the axis, team: the value, hold: the ms; the host checks them */
         else {
             api->log("mapval: bad tour line: %s", line);
             continue;
@@ -481,6 +487,11 @@ static void begin(int i, double t) {
             snprintf(line, sizeof line, "capture %d", s->team);
         request(line);
         api->log("mapval capture %d %s %.3f", s->team, s->name[0] ? s->name : "-", t);
+    } else if (s->kind == S_STICK) {
+        char line[128];
+        snprintf(line, sizeof line, "stick %s %d %.0f", s->name, s->team, s->hold);
+        request(line);
+        api->log("mapval stick %s %d %.0f %.3f", s->name, s->team, s->hold, t);
     } else {
         api->log("mapval step %d wait %.3f %.1f s", i, t, s->hold);
     }
@@ -649,7 +660,8 @@ static void tick(double t) {
     } else if (s->kind == S_HOLD) {
         heal();
         if (el >= s->hold) next = 1;
-    } else if (s->kind == S_MARK || s->kind == S_CAMERA || s->kind == S_QUIET || s->kind == S_DUMP || s->kind == S_CAPTURE) {
+    } else if (s->kind == S_MARK || s->kind == S_CAMERA || s->kind == S_QUIET || s->kind == S_DUMP || s->kind == S_CAPTURE ||
+               s->kind == S_STICK) {
         next = 1; /* done in begin() */
     } else if (el >= s->hold) {
         next = 1;

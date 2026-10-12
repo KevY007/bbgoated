@@ -178,6 +178,32 @@ class TourTest(unittest.TestCase):
         self.assertIn("travel 3402950 22000000 laurence-staircase\nwarp laurence-staircase:view %.3f %.3f %.3f %.4f 1.0\n"
                       % (x, y, z, yaw), text)
 
+    def test_sweep_tour(self):
+        """--sweep: the perf pass holds the right stick over for the whole
+        window, from the window's mark (the host carries the request out, the
+        stick held for the measure time), so the camera turns at a steady rate
+        and stops at the window's end. Off, the tour has no stick step; the
+        capture pass, which needs a still view, never has one."""
+        areas = ac.pick_areas("central-yharnam,moonside-lake")
+        self.assertIsNone(ac.DEFAULTS["sweep"])  # off unless asked for
+        self.assertEqual(ac.SWEEP_VALUE, 182)  # calibrated on the game: 12 degrees a second, 238 through a 20 s window
+        still = ac.tour(areas, dict(ac.DEFAULTS), "perf")
+        self.assertNotIn("stick", still)
+        swept = ac.tour(areas, dict(ac.DEFAULTS, sweep=ac.SWEEP_VALUE), "perf")
+        lines = swept.splitlines()
+        for a in areas:
+            k = lines.index("mark %s:measure" % a.id)
+            self.assertEqual(lines[k + 1], "stick rx %d 20000" % ac.SWEEP_VALUE)  # the 20 s window, in ms
+            self.assertEqual(lines[k + 2], "hold 20.0")
+            self.assertEqual(lines[k + 3], "mark %s:measured" % a.id)
+        # Nothing else changes: the settle is still, the dumps are where they were.
+        self.assertEqual([l for l in lines if not l.startswith("stick")], still.splitlines())
+        # The value and the window as asked for; 0 is a value, not "off".
+        text = ac.tour(areas[:1], dict(ac.DEFAULTS, sweep=200, measure=12.5), "perf")
+        self.assertIn("mark central-yharnam:measure\nstick rx 200 12500\nhold 12.5\nmark central-yharnam:measured\n", text)
+        self.assertIn("\nstick rx 0 20000\n", ac.tour(areas[:1], dict(ac.DEFAULTS, sweep=0), "perf"))
+        self.assertNotIn("stick", ac.tour(areas, dict(ac.DEFAULTS, sweep=ac.SWEEP_VALUE), "capture"))
+
     def test_capture_tour_and_settings(self):
         areas = ac.pick_areas("hunters-nightmare")
         opts = dict(ac.DEFAULTS, pipeline_cache=True, env=[])
@@ -825,6 +851,53 @@ class CompareTest(unittest.TestCase):
         self.assertIn("pixel shaders first met here: 1 lifted, 2 translated", text)
         self.assertIn("fps", text)
 
+    def test_summary_says_the_sweep(self):
+        """The header says whether the camera was swept and at what value; a
+        report from before the sweep existed was a still camera."""
+        rep = {"dir": "/r", "run": {"version": "v1", "numa_node": 0, "fps": 60}, "passes": {}, "areas": {}}
+        self.assertIn("camera sweep off;", ac.summary_text(rep))
+        self.assertIn("camera sweep off;", ac.summary_text(dict(rep, run=dict(rep["run"], sweep=None))))
+        self.assertIn("camera sweep right stick 176;", ac.summary_text(dict(rep, run=dict(rep["run"], sweep=176))))
+        self.assertEqual(ac.sweep_text(0), "right stick 0")
+
+    def test_runs_with_different_sweeps_are_not_compared(self):
+        """A swept window and a still one are not the same measurement: compare
+        refuses (exit 2, a message, nothing written) runs whose sweeps differ,
+        across the arms or within one. A report from before the sweep existed
+        was a still run."""
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            def run(name, **meta):
+                d = Path(tmp) / name
+                d.mkdir()
+                rep = self.report(60.0, 17.0, 400, 0.7)
+                rep["run"] = dict(meta)
+                (d / "report.json").write_text(json.dumps(rep))
+                return str(d)
+            still, old, s176, s190 = run("still", sweep=None), run("old"), run("s176", sweep=176), run("s190", sweep=190)
+            outs = iter(Path(tmp) / ("ab%d" % n) for n in range(20))
+
+            def compare(a, b):
+                out, err = next(outs), io.StringIO()
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    rc = ac.main(["compare", "--a"] + a + ["--b"] + b + ["--out", str(out)])
+                return rc, err.getvalue(), out
+            for a, b in (([still, old], [old, still]), ([s176], [s176, s176])):
+                rc, err, out = compare(a, b)
+                self.assertEqual((rc, err), (0, ""))
+                self.assertTrue((out / "ab.json").is_file())
+            for a, b in (([still], [s176]), ([s176], [still]), ([old], [s176]), ([s176], [s190]), ([s176, still], [s176, s176])):
+                rc, err, out = compare(a, b)
+                self.assertEqual(rc, 2, (a, b))
+                self.assertIn("camera sweeps differ", err)
+                self.assertIn("compare runs made with the same --sweep", err)
+                self.assertFalse(out.exists())  # refused before anything was written
+            # It says which runs were swept how.
+            rc, err, _ = compare([still], [s176])
+            self.assertIn("off: %s" % Path(still).resolve(), err)
+            self.assertIn("right stick 176: %s" % Path(s176).resolve(), err)
+
 
 # A stand-in for the game: it follows the tour as the probe would and prints
 # the probe's and the host's lines, writes the frames the dump requests ask
@@ -924,15 +997,30 @@ class EndToEndTest(unittest.TestCase):
         ac.EBOOT_109_SHA256, ac.check_areas = self.saved
         self.tmp.cleanup()
 
-    def run_once(self, name):
+    def options(self, name):
         d = self.d
-        args = ["run", "--bbhost", str(d / "build" / "bbhost"), "--app0", str(d / "app0"), "--eboot", str(d / "eboot.bin"),
+        return ["--app0", str(d / "app0"), "--eboot", str(d / "eboot.bin"),
                 "--seed", str(d / "seed"), "--out", str(d / name), "--areas", "central-yharnam,moonside-lake", "--numa-node", "none",
                 "--captures", "2", "--capture-window", "3", "--settle", "3", "--measure", "6", "--width", "4", "--height", "4"]
+
+    def main(self, args):
+        """ac.main(args) with what it printed to stdout dropped and what it
+        printed to stderr left in self.stderr."""
         import contextlib
         import io
-        with contextlib.redirect_stdout(io.StringIO()):
-            return ac.main(args)
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = ac.main(args)
+        self.stderr = err.getvalue()
+        return rc
+
+    def run_once(self, name, *extra):
+        """`run` into <name>; extra options come last, so they win."""
+        return self.main(["run", "--bbhost", str(self.d / "build" / "bbhost")] + self.options(name) + list(extra))
+
+    def compare_runs(self, a, b, out):
+        """`compare` of the run folders a and b (names) into out."""
+        return self.main(["compare", "--a", str(self.d / a), "--b", str(self.d / b), "--out", str(self.d / out)])
 
     def test_run_and_compare(self):
         self.assertEqual(self.run_once("a1"), 0, (self.d / "a1" / "summary.txt").read_text())
@@ -973,6 +1061,53 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(f["ab"]["changed_pct"], 0.0)
         self.assertEqual(ab["areas"]["central-yharnam"]["perf"]["fps"]["verdict"], "same")
         self.assertTrue((self.d / "ab" / "ab.txt").is_file())
+
+    def test_sweep_options_and_plan(self):
+        """--sweep alone is the default value, --sweep N is N, none is off; run
+        and ab both take it, and the plan records it. A value a stick cannot
+        have is refused before anything is made."""
+        for name, extra, want in (("d0", [], None), ("d1", ["--sweep"], ac.SWEEP_VALUE), ("d2", ["--sweep", "200"], 200),
+                                  ("d3", ["--sweep", "0"], 0)):
+            self.assertEqual(self.run_once(name, "--dry-run", *extra), 0, self.stderr)
+            plan = json.loads((self.d / name / "plan.json").read_text())
+            self.assertEqual(plan["options"]["sweep"], want)
+            self.assertEqual("stick rx" in (self.d / name / "perf" / "tour.txt").read_text(), want is not None)
+        bb = str(self.d / "build" / "bbhost")
+        ab = ["ab", "--a", bb, "--b", bb, "--rounds", "1", "--dry-run", "--sweep", "190"] + self.options("ab")
+        self.assertEqual(self.main(ab), 0, self.stderr)
+        for arm in ("a1", "b1"):
+            self.assertEqual(json.loads((self.d / "ab" / arm / "plan.json").read_text())["options"]["sweep"], 190)
+        for bad in ("256", "-1"):
+            self.assertEqual(self.run_once("bad", "--dry-run", "--sweep", bad), 2)
+            self.assertIn("--sweep takes a stick value, 0-255", self.stderr)
+            self.assertFalse((self.d / "bad").exists())
+
+    def test_sweep_run(self):
+        """--sweep through whole runs (the stand-in game): the perf pass's tour
+        has the stick step and the capture pass's does not; the report and the
+        summary say it, and say it again after `report`; compare refuses a swept
+        run against a still one or another value, and compares two of a kind."""
+        self.assertEqual(self.run_once("s1", "--sweep"), 0, (self.d / "s1" / "summary.txt").read_text())
+        self.assertEqual(self.run_once("s2", "--sweep", "--captures", "0"), 0)
+        self.assertEqual(self.run_once("s3", "--sweep", "200", "--captures", "0"), 0)
+        self.assertEqual(self.run_once("n1", "--captures", "0"), 0)
+        # A place each; the window is --measure 6.
+        self.assertEqual((self.d / "s1" / "perf" / "tour.txt").read_text().count("stick rx %d 6000\n" % ac.SWEEP_VALUE), 2)
+        self.assertNotIn("stick", (self.d / "s1" / "capture" / "tour.txt").read_text())
+        self.assertNotIn("stick", (self.d / "n1" / "perf" / "tour.txt").read_text())
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ac.main(["report", str(self.d / "s1")]), 0)
+        for name, want, said in (("s1", ac.SWEEP_VALUE, "camera sweep right stick %d;" % ac.SWEEP_VALUE),
+                                 ("s3", 200, "camera sweep right stick 200;"), ("n1", None, "camera sweep off;")):
+            self.assertEqual(json.loads((self.d / name / "report.json").read_text())["run"]["sweep"], want)
+            self.assertIn(said, (self.d / name / "summary.txt").read_text())
+        self.assertEqual(self.compare_runs("s1", "s2", "ab-s1-s2"), 0, self.stderr)
+        for b in ("n1", "s3"):
+            self.assertEqual(self.compare_runs("s1", b, "ab-s1-" + b), 2)
+            self.assertIn("camera sweeps differ", self.stderr)
+            self.assertFalse((self.d / ("ab-s1-" + b)).exists())
 
 
 if __name__ == "__main__":

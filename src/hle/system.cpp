@@ -1479,6 +1479,10 @@ namespace {
 struct PadTap {
     std::uint32_t button;
     std::chrono::steady_clock::time_point from, until;
+    // bbgoated: a stick held at `value` instead of a button (hle_pad_stick);
+    // axis 0 lx, 1 ly, 2 rx, 3 ry, -1 for a button.
+    int axis = -1;
+    std::uint8_t value = 0;
 };
 std::mutex g_taps_mu;
 std::vector<PadTap> g_taps;  // under g_taps_mu
@@ -1836,7 +1840,13 @@ GUEST_ABI int hle_pad_read(int handle, std::uint8_t* st) {
                 continue;
             }
             if (now >= it->from) {
-                p.buttons |= it->button;
+                if (it->axis < 0) {
+                    p.buttons |= it->button;
+                } else {
+                    // bbgoated: a stick held over (hle_pad_stick), whatever the pad read.
+                    std::uint8_t& stick = it->axis == 0 ? p.lx : it->axis == 1 ? p.ly : it->axis == 2 ? p.rx : p.ry;
+                    stick = it->value;
+                }
                 g_tap_pad.store(true, std::memory_order_relaxed);
             }
             ++it;
@@ -2201,6 +2211,16 @@ void hle_pad_tap(std::uint32_t button, int delay_ms, int hold_ms) {
     const auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lk(g_taps_mu);
     g_taps.push_back(PadTap{button, now + std::chrono::milliseconds(delay_ms), now + std::chrono::milliseconds(delay_ms + hold_ms)});
+}
+
+// bbgoated: a stick held at `value` (0..255, 127 at rest) from `delay_ms` on, for `hold_ms`: axis 0 lx, 1 ly,
+// 2 rx, 3 ry. The right stick's X axis turns the follow camera at a steady rate (area_check.py --sweep).
+void hle_pad_stick(int axis, std::uint8_t value, int delay_ms, int hold_ms) {
+    if (axis < 0 || axis > 3) return;
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lk(g_taps_mu);
+    g_taps.push_back(PadTap{0, now + std::chrono::milliseconds(delay_ms),
+                            now + std::chrono::milliseconds(delay_ms + hold_ms), axis, value});
 }
 
 // Saves mounted for writing now: a run that has to end waits for none (a

@@ -154,6 +154,9 @@ void hle_video_set_picture(unsigned w, unsigned h);
 // A pad press the game reads as the player's: `button` (the pad's bits) from
 // `delay_ms` on, held `hold_ms`. Any thread.
 void hle_pad_tap(std::uint32_t button, int delay_ms, int hold_ms);
+// bbgoated: a stick the game reads held at `value` (0..255) from `delay_ms` on,
+// for `hold_ms`: axis 0 lx, 1 ly, 2 rx, 3 ry. Any thread.
+void hle_pad_stick(int axis, std::uint8_t value, int delay_ms, int hold_ms);
 // A pad button by the name BBHOST_AUTOPRESS gives it (cross, circle, l1, ...),
 // 0 for none. The stick names (lup, rright, ...) are bits above the pad's,
 // which only the autopress script turns into a deflection.

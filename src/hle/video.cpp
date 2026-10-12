@@ -213,13 +213,16 @@ const bool g_present_on_arrival = [] {
 //   menutap <button> [<ms>]  the same, only while one of the game's menus has the
 //                         input - the way through the title that cannot press
 //                         anything in the world, however late it arrives
+//   stick <axis> <value> <ms>  hold a stick (lx, ly, rx or ry) at <value> (0-255,
+//                         127 at rest) for <ms>: the right stick's X axis turns the
+//                         follow camera at a steady rate (area_check.py --sweep)
 // A thread of its own (bb-test-req) reads the folder ten times a second and
 // queues what it finds; the flips carry the queue out. Read on the flip, the
 // folder held the flip clock whenever the file system was slow to answer: on
 // NFS, a listing queued behind a shader cache's write-back stopped every flip
 // for 1.5 s, the harness runs' freeze every ~90 s.
 struct TestRequest {
-    std::string name, verb, arg, arg2;
+    std::string name, verb, arg, arg2, arg3;
 };
 std::mutex g_test_req_mu;
 std::deque<TestRequest> g_test_reqs;  // under g_test_req_mu
@@ -239,7 +242,7 @@ void test_requests_read(const std::string& dir) {
             r.name = p.filename().string();
             {
                 std::ifstream f(p);
-                f >> r.verb >> r.arg >> r.arg2;
+                f >> r.verb >> r.arg >> r.arg2 >> r.arg3;
             }
             fs::remove(p, ec);
             std::lock_guard<std::mutex> lk(g_test_req_mu);
@@ -272,7 +275,7 @@ void test_requests(std::uint64_t display_va, std::uint64_t count) {
         todo.swap(g_test_reqs);
     }
     for (const TestRequest& r : todo) {
-        const std::string &verb = r.verb, &arg = r.arg, &arg2 = r.arg2;
+        const std::string &verb = r.verb, &arg = r.arg, &arg2 = r.arg2, &arg3 = r.arg3;
         if (verb == "dump" && !arg.empty()) {
             const bool ok = display_va && host_gpu_dump_display(display_va, arg.c_str());
             host_log("test: frame dump at flip %llu to %s%s", static_cast<unsigned long long>(count), arg.c_str(), ok ? "" : " failed");
@@ -292,6 +295,29 @@ void test_requests(std::uint64_t display_va, std::uint64_t count) {
             } else {
                 hle_pad_tap(button, 0, hold);
                 host_log("test: %s %s (0x%x) for %d ms at flip %llu", verb.c_str(), arg.c_str(), button, hold,
+                         static_cast<unsigned long long>(count));
+            }
+        } else if (verb == "stick" && !arg.empty()) {
+            // bbgoated: a stick held over for a time. Anything but an axis, a value
+            // of 0-255 and a hold above 0 ms is refused, like a tap's.
+            static const char* const axes[] = {"lx", "ly", "rx", "ry"};
+            int axis = -1;
+            for (int i = 0; i < 4; ++i) {
+                if (arg == axes[i]) axis = i;
+            }
+            // A whole number in lo..hi, else lo - 1.
+            const auto whole = [](const std::string& s, long long lo, long long hi) {
+                char* end = nullptr;
+                const long long v = std::strtoll(s.c_str(), &end, 10);
+                return !s.empty() && !*end && v >= lo && v <= hi ? v : lo - 1;
+            };
+            const long long value = whole(arg2, 0, 255), hold = whole(arg3, 1, INT_MAX);
+            if (axis < 0 || value < 0 || hold < 1) {
+                host_log("test: stick %s %s %s: not an axis (lx, ly, rx, ry), a value 0-255 and a hold in ms", arg.c_str(),
+                         arg2.c_str(), arg3.c_str());
+            } else {
+                hle_pad_stick(axis, static_cast<std::uint8_t>(value), 0, static_cast<int>(hold));
+                host_log("test: stick %s %lld for %lld ms at flip %llu", arg.c_str(), value, hold,
                          static_cast<unsigned long long>(count));
             }
         } else {

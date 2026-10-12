@@ -1,7 +1,7 @@
 // tools/mapval_plugin.c on a host of our own: no game, no GPU. The probe is
 // loaded as the host loads plugins and given a tour of the steps
 // tools/area_check.py writes - a lamp travel, a view warp, quiet, camera,
-// marks, holds, a frame dump and captures - over a pretend player, camera,
+// marks, holds, a stick, a frame dump and captures - over a pretend player, camera,
 // loading screen and two characters, in memory laid out as the probe reads
 // the game's.
 //
@@ -226,6 +226,7 @@ int main(int argc, char** argv) {
                                "mark central-yharnam:arrived\n"
                                "hold 0.1\n"
                                "mark central-yharnam:measure\n"
+                               "stick rx 176 200\n"
                                "hold 0.2\n"
                                "mark central-yharnam:measured\n"
                                "dump central-yharnam-a\n"
@@ -277,7 +278,7 @@ int main(int argc, char** argv) {
         fs::remove_all(dir);
         return g_failures ? 1 : 0;
     }
-    CHECK(logged("mapval: tour of 18 steps"));
+    CHECK(logged("mapval: tour of 19 steps"));
     CHECK(g_world.frame != nullptr);
 
     // Frames, 5 ms apart, until the tour is done or 30 s pass. A travel puts
@@ -337,13 +338,18 @@ int main(int argc, char** argv) {
     CHECK(logged("mapval camera") && logged(" reset"));
     // hold: the player's HP back to full.
     CHECK(get<std::int32_t>(kData + 0xf8) == 100);
+    // stick: asked of the host once, inside the window, with the axis, the
+    // value and the time as given.
+    CHECK(logged("mapval stick rx 176 200 "));
+    CHECK(b < log_index("mapval stick rx") && log_index("mapval stick rx") < c);
     // The requests, one file each, in order.
     const std::string r0 = read_text(dir / "requests" / "000000.req"), r1 = read_text(dir / "requests" / "000001.req"),
-                      r2 = read_text(dir / "requests" / "000002.req");
-    CHECK(r0 == "dump " + (dir / "frames" / "central-yharnam-a.ppm").string() + "\n");
-    CHECK(r1 == "capture 6 " + (dir / "captures" / "central-yharnam").string() + "\n");
-    CHECK(r2 == "capture 0\n");
-    CHECK(!fs::exists(dir / "requests" / "000003.req"));
+                      r2 = read_text(dir / "requests" / "000002.req"), r3 = read_text(dir / "requests" / "000003.req");
+    CHECK(r0 == "stick rx 176 200\n");
+    CHECK(r1 == "dump " + (dir / "frames" / "central-yharnam-a.ppm").string() + "\n");
+    CHECK(r2 == "capture 6 " + (dir / "captures" / "central-yharnam").string() + "\n");
+    CHECK(r3 == "capture 0\n");
+    CHECK(!fs::exists(dir / "requests" / "000004.req"));
     CHECK(!fs::exists(dir / "requests" / "000000.tmp"));
     // A death: the player's HP gone to 0 is a line of its own, once.
     CHECK(!logged("mapval death"));

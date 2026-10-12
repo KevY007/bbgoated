@@ -64,7 +64,38 @@ player and holds still:
 2. the window (20 s): what the place costs;
 3. two frames of the display, 2 s apart.
 
-That is the perf pass. A second session, the capture pass, visits the same
+That is the perf pass. By default the camera stands still behind the player
+all through it. With `--sweep [VALUE]` the probe turns it through the window:
+right after the window's mark it asks the host (the test request
+`stick rx VALUE 20000`) to hold the right stick's X axis at VALUE - 0 to 255,
+128 is centre, 182 without a value - for the whole window, so the camera turns
+at a steady rate and stops where the window ends. A place is then seen from
+many sides, geometry streams into view and the frame times follow what the
+camera faces, which a fixed view hides; the same stick for the same time makes
+the same turn in every run. The settle is still, and so is the capture pass
+below, which needs a still view. The frames are taken where the camera
+stopped. A swept window is not a still one: the plan and the report record the
+sweep, `summary.txt` says it, and `compare` refuses runs whose sweeps differ.
+
+The turn was measured on the game (the camera's own angles four times a
+second, at Central Yharnam; the same at the 30, 60 and 120 fps settings). The
+camera does not turn up to a dead zone that ends at 175; above it, it turns
+1.62 degrees a second for each step of the stick: 176 is 2 degrees a second,
+180 is 9, 184 is 15, 192 is 28, 224 is 80, and a full stick, 255, spins at 260.
+The default, 182, is 11.9 degrees a second: 238 degrees through the 20 s
+window, a pan slow enough to follow that ends facing another way. One step of
+the stick is 32 degrees through the window, so pick a VALUE by these numbers,
+not by feel. With the camera still the GPU busy meter stayed within 491-497
+ms/s through the window; swept, it moved over 407-538 ms/s with the view, the
+same way in each of three runs.
+
+Two runs ended their turn 0.04 degrees apart. That is a pixel or so, enough to
+change half the pixels of a frame in the A/B's frame comparison, and the first
+frame is taken within a few frames of the stick's release, so it can catch the
+end of the turn (the second, 2 s later, is at rest): judge pictures from a run
+without `--sweep`, and frame times from one with it.
+
+A second session, the capture pass, visits the same
 places and captures the first draw of up to six pixel shaders at each that
 earlier places did not capture; `tools/lift_verify.py` replays each with the
 lifted pixel shader and with the translated one and compares the outputs byte
@@ -125,7 +156,8 @@ tools/area_check.py report <run>                     # the report again from a r
 checks each place's lamp and view against the game's data, builds the probe
 and writes the plan, the tours, the configs and the commands, and starts
 nothing. `--areas` picks places, `--settle`, `--measure` and `--captures`
-change the timings, `--pipeline-cache off` compiles every shader when first
+change the timings, `--sweep [VALUE]` turns the camera through each window
+(`run` and `ab`), `--pipeline-cache off` compiles every shader when first
 met instead of from the seed's stage manifest. The dry run says how long each
 pass should take: about 15 minutes each for all twelve places, then the lift
 checks.
@@ -155,7 +187,7 @@ These are for test runs and off by default.
 |---|---|
 | `BBHOST_FRAME_DETAIL=1` | with `BBHOST_FRAME_STATS=1`: after each second's `frames:` line, the second's draws by how their pixel shader ran, its draw failures and every flip interval |
 | `BBHOST_TEST_WARP=1` | lets plugins move the player (the probe) |
-| `BBHOST_TEST_REQUESTS=<dir>` | the game carries out requests a harness leaves there: a frame dump, a capture budget |
+| `BBHOST_TEST_REQUESTS=<dir>` | the game carries out requests a harness leaves there: a frame dump, a capture budget, a stick held over for a time (`stick rx 176 20000`) |
 | `BBHOST_CAPTURE_DRAW=*ps` | a draw capture of the first draw of each pixel shader |
 | `BBHOST_CAPTURE_ARMED=1` | captures only while a request has allowed them |
 
