@@ -1,10 +1,12 @@
 #include "core/host_clock.h"
+#include "host/perf/core/pcores_core.h"
 #include "log.h"
 
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <mutex>
+#include <vector>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -155,9 +157,43 @@ void host_timing_init() {
 #endif
 }
 
+#if defined(_WIN32)
+// bbgoated (host/perf/core/pcores_core.h, BBHOST_BBG_PCORES=1): the calling
+// GPU-feeding thread on the performance cores, through CPU sets (a soft
+// restriction, not affinity). Looked up by name: CPU sets are Windows 10 and
+// later.
+static void pcores_for_this_thread(const char* who) {
+    using GetInfo = BOOL(WINAPI*)(PSYSTEM_CPU_SET_INFORMATION, ULONG, PULONG, HANDLE, ULONG);
+    using SetSets = BOOL(WINAPI*)(HANDLE, const ULONG*, ULONG);
+    HMODULE k = GetModuleHandleW(L"kernel32.dll");
+    const auto get = k ? reinterpret_cast<GetInfo>(reinterpret_cast<void*>(GetProcAddress(k, "GetSystemCpuSetInformation"))) : nullptr;
+    const auto set = k ? reinterpret_cast<SetSets>(reinterpret_cast<void*>(GetProcAddress(k, "SetThreadSelectedCpuSets"))) : nullptr;
+    if (!get || !set) return;
+    ULONG len = 0;
+    get(nullptr, 0, &len, GetCurrentProcess(), 0);
+    if (!len) return;
+    std::vector<std::uint8_t> buf(len);
+    if (!get(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buf.data()), len, &len, GetCurrentProcess(), 0)) return;
+    std::vector<bbg::CpuSet> sets;
+    for (ULONG at = 0; at + sizeof(DWORD) * 2 <= len;) {
+        const auto* e = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buf.data() + at);
+        if (!e->Size) break;
+        if (e->Type == CpuSetInformation) sets.push_back({e->CpuSet.Id, e->CpuSet.EfficiencyClass});
+        at += e->Size;
+    }
+    const std::vector<std::uint32_t> ids = bbg::performance_cpu_sets(sets);
+    if (ids.empty()) return;
+    std::vector<ULONG> u(ids.begin(), ids.end());
+    const bool ok = set(GetCurrentThread(), u.data(), static_cast<ULONG>(u.size())) != 0;
+    host_log("timing: %s %s the %zu performance-core CPU sets of %zu (BBHOST_BBG_PCORES)", who, ok ? "runs on" : "could not be put on",
+             u.size(), sets.size());
+}
+#endif
+
 void host_thread_set_class(HostThreadClass c, const char* who) {
     static const bool on = !env_off("BBHOST_THREAD_PRIO");
 #if defined(_WIN32)
+    if (const char* p = std::getenv("BBHOST_BBG_PCORES"); p && p[0] == '1') pcores_for_this_thread(who);  // bbgoated (BBHOST_BBG_PCORES)
     const char* const level = c == HostThreadClass::Pacing ? "highest" : "above-normal";
     if (!on) {
         static std::atomic<bool> said{false};
