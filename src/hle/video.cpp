@@ -9,6 +9,7 @@
 #include "host/gpu.h"
 #include "core/config.h"
 #include "host/window.h"
+#include "host/perf/frame_pacing.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1017,6 +1018,7 @@ void hle_video_finish_flip(int handle, int buffer, std::int64_t arg, bool record
     // recording only when the frame is still in it (host_gpu_submit_for_flip).
     const std::uint64_t work = g_flip_after_gpu || recorded ? host_gpu_work_needs() : 0;
     const std::uint64_t gpu_need = g_flip_after_gpu ? work : 0;
+    bbg::FramesAheadGuard frames_ahead(work, recorded);  // bbgoated (host/perf/frame_pacing.cpp, BBHOST_BBG_FRAMES_AHEAD): waits at the end
     PresentFlip flip;
     flip.submit_need = recorded ? work : ~0ull;
     flip.arrived_ns = steady_ns();
