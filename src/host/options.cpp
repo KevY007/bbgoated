@@ -1,5 +1,4 @@
 #include "host/options.h"
-#include "host/options_carry.h"
 #include "host/updater.h"
 #include "host/settings.h"
 
@@ -563,17 +562,27 @@ std::string options_path() {
     // working directory) is copied over the first time: nobody is signed out.
     static const std::string path = [] {
         const HostConfig& c = config();
-        const std::string mine = config_user_dir() + "/" +
-                                 (c.profile.empty() ? std::string("bbhost-options.toml") : "bbhost-options-" + c.profile + ".toml");
+#if defined(BBHOST_BBGOATED)
+        const std::string stem = "bbgoated-options";  // bbgoated's own, beside its bbgoated.toml
+#else
+        const std::string stem = "bbhost-options";
+#endif
+        const std::string mine = config_user_dir() + "/" + (c.profile.empty() ? stem + ".toml" : stem + "-" + c.profile + ".toml");
         std::ifstream have(mine);
         if (have) return mine;
-        const auto beside = [](const std::string& f) {
+        const auto beside = [&stem](const std::string& f) {
             const std::size_t slash = f.find_last_of("/\\");
-            return (slash == std::string::npos ? std::string() : f.substr(0, slash + 1)) + "bbhost-options.toml";
+            return (slash == std::string::npos ? std::string() : f.substr(0, slash + 1)) + stem + ".toml";
         };
         std::vector<std::string> old;
         if (!c.profile.empty()) {
             old.push_back(beside(c.profile_config));
+#if defined(BBHOST_BBGOATED)
+        } else if (!std::getenv("BBHOST_CONFIG_DIR")) {
+            // bbgoated's first start: bbhost's F10 settings, key bindings and
+            // signed-in account come over once (bbhost's file is only read).
+            old.push_back(config_bbhost_user_dir() + "/bbhost-options.toml");
+#endif
         } else {
             for (const char* f : {"bbhost.toml"}) old.push_back(beside(f));
             old.push_back(beside(config_exe_dir() + "/bbhost.toml"));
@@ -670,12 +679,6 @@ void save() {
         return;
     }
     const std::string path = options_path();
-#if defined(BBHOST_BBGOATED)
-    // The file is bbhost's too: what it held before this save, for the keys this
-    // build does not know (host/options_carry.h).
-    std::string carried_from;
-    if (std::ifstream in{path, std::ios::binary}) carried_from.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-#endif
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) {
         host_log("options: cannot write %s", path.c_str());
@@ -697,9 +700,6 @@ void save() {
                      net::account_token().c_str());
     }
     std::fclose(f);
-#if defined(BBHOST_BBGOATED)
-    options_carry_apply(path, carried_from);
-#endif
     g_dirty = false;
     host_log("options: saved %s", path.c_str());
 }

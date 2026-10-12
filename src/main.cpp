@@ -294,7 +294,7 @@ void device_lost_exit(bool windowed) {
             "bbhost has to close.\n\n";
         if (host_foreign_hooks_obs()) {
             text += "OBS's game capture is hooked into bbhost (graphics-hook64.dll), a common cause of this. Try again with "
-                    "obs_capture = \"off\" under [video] in bbhost.toml (OBS's Window Capture still records bbhost), or set "
+                    "obs_capture = \"off\" under [video] in " + std::string(config_file_name()) + " (OBS's Window Capture still records it), or set "
                     "DISABLE_VULKAN_OBS_CAPTURE=1 before starting it.\n\n";
         } else if (const std::string hooks = host_foreign_hooks(); !hooks.empty()) {
             text += "Hooked into bbhost: " + hooks + ". Overlays like these can cause this; try again without them.\n\n";
@@ -918,7 +918,7 @@ int main(int argc, char** argv) {
     std::string err;
     if (!config_load(argc, argv, &cfg, &err)) {
         host_log("%s", err.c_str());
-        host_log("usage: %s [--config bbhost.toml] [--app0 DIR] [--data DIR] [--eboot FILE]"
+        host_log("usage: %s [--config CONFIG.toml] [--app0 DIR] [--data DIR] [--eboot FILE]"
                  " [--write-config PATH] [--headless] [--setup] [eboot]",
                  argv[0]);
         host_log("docs/running.md: where the configuration is looked for and what to put in it");

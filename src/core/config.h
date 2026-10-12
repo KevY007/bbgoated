@@ -153,6 +153,10 @@ struct ConfigEdit {
 bool config_set_values(const std::string& path, const std::vector<ConfigEdit>& edits);
 // The per-user bbhost.toml (config_user_dir()/bbhost.toml).
 std::string config_user_file();
+// The per-user config's file name: "bbhost.toml", or "bbgoated.toml" in a bbgoated build.
+const char* config_file_name();
+// bbhost's own per-user folder (a bbgoated build reads it once, on its first start).
+std::string config_bbhost_user_dir();
 // The folder saves go to when paths.data is not set (the per-user data folder).
 std::string config_default_data_dir();
 // The per-user folder the config and the F10 settings live in: %APPDATA%/bbhost,

@@ -1,4 +1,5 @@
 #include "host/launcher.h"
+#include "host/bbgoated.h"
 
 #include "bbhost_version.h"
 #include "core/sha256.h"
@@ -138,7 +139,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         return LauncherResult::Quit;
     }
     const float scale = std::max(1.0f, SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()));
-    SDL_Window* win = SDL_CreateWindow("bbhost setup", static_cast<int>(980 * scale), static_cast<int>(760 * scale),
+    SDL_Window* win = SDL_CreateWindow(BBHOST_PRODUCT " setup", static_cast<int>(980 * scale), static_cast<int>(760 * scale),
                                        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     SDL_Renderer* ren = win ? SDL_CreateRenderer(win, nullptr) : nullptr;
     if (!win || !ren) {
@@ -251,9 +252,10 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         const std::string& o = r.p.option;
         if (o == "startup.skip_intro") return "The same switch as the Game tab's Skip company logos.";
         if (o == "debug.free_camera") return "The same switch as the Game tab's Debug camera.";
-        if (o == "loading.quick_reentry") return "Saved as quick_reentry under [loading] in bbhost.toml.";
-        if (o == "streaming.all_post_processors") return "Saved as all_post_processors under [streaming] in bbhost.toml.";
-        return "Saved as " + r.p.name + " under [patches] in bbhost.toml.";
+        const std::string file = config_file_name();
+        if (o == "loading.quick_reentry") return "Saved as quick_reentry under [loading] in " + file + ".";
+        if (o == "streaming.all_post_processors") return "Saved as all_post_processors under [streaming] in " + file + ".";
+        return "Saved as " + r.p.name + " under [patches] in " + file + ".";
     };
 
     EbootCheck eboot = check_eboot(f[kEboot].str());
@@ -360,8 +362,8 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         ImGui::SetNextWindowSize(vp->WorkSize);
         ImGui::Begin("setup", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
 
-        ImGui::Text("bbhost %s - setup", BBHOST_VERSION);
-        ImGui::TextDisabled("Saved to %s, which every copy of bbhost reads.", config_user_file().c_str());
+        ImGui::Text(BBHOST_PRODUCT " %s - setup", BBHOST_VERSION);
+        ImGui::TextDisabled("Saved to %s, which every copy of " BBHOST_PRODUCT " reads.", config_user_file().c_str());
         if (!reason.empty()) ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.30f, 1.0f), "%s", reason.c_str());
         // While the Updates box is checked: one check, on a thread of its own
         // (host/updater.h), and a newer release's page opens in the browser.
@@ -444,7 +446,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
                                             : !r.p.enabled            ? "Turned off in its own file ([patch] enabled = false)."
                                             : other_eboot             ? "Made for another eboot: not applied."
                                             : unknown_option          ? "Follows " + r.p.option + ", which this bbhost does not know: not applied."
-                                            : r.p.option.empty() && !bare_key(r.p.name) ? "Its name cannot be a bbhost.toml key, so it is always on."
+                                            : r.p.option.empty() && !bare_key(r.p.name) ? "Its name cannot be a " + std::string(config_file_name()) + " key, so it is always on."
                                                                                        : patch_note(r);
                     const std::string where = generic(fs::path(r.p.path).lexically_normal().string());
                     ImGui::TextDisabled("%s %s", why.c_str(), where.c_str());
