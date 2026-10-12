@@ -1,11 +1,13 @@
 // See dlaa.h.
 #include "host/dlaa.h"
-#include "host/dlaa_aa.h"
-#include "host/options.h"
 
 #include "core/config.h"
 #include "hle/modules.h"
 #include "host/gpu_internal.h"
+#include "host/object_motion.h"
+#include "host/settings.h"
+#include "host/display_settings.h"
+#include "host/fsr_upscaler.h"
 #include "host/shaders/dlaa_mv.spv.h"
 #include "log.h"
 
@@ -17,52 +19,19 @@
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <map>
 #include <set>
 
 #if defined(_WIN32)
 #include <windows.h>
 #endif
 
-// The bridge's C API (ngx_bridge/ngx_bridge.h), declared here as the
-// function-pointer types bbhost loads: the bridge is a separate MSVC build.
-extern "C" {
-typedef struct NgxbImage {
-    VkImage image;
-    VkImageView view;
-    VkFormat format;
-    uint32_t width, height;
-    uint32_t aspect;
-} NgxbImage;
-typedef struct NgxbEval {
-    NgxbImage color, output, depth, motion;
-    float jitter_x, jitter_y;
-    float mv_scale_x, mv_scale_y;
-    int32_t reset;
-    float frame_ms;
-} NgxbEval;
-typedef void (*NgxbLogFn)(const char* message);
-typedef int32_t (*PFN_ngxb_version)(void);
-typedef uint32_t (*PFN_ngxb_required_extensions)(uint32_t*, const char* const**, uint32_t*, const char* const**);
-typedef uint32_t (*PFN_ngxb_init)(VkInstance, VkPhysicalDevice, VkDevice, PFN_vkGetInstanceProcAddr, PFN_vkGetDeviceProcAddr,
-                                  const wchar_t*, const wchar_t*, NgxbLogFn);
-typedef uint32_t (*PFN_ngxb_create)(VkCommandBuffer, uint32_t, uint32_t, uint32_t, int32_t);
-typedef uint32_t (*PFN_ngxb_evaluate)(VkCommandBuffer, const NgxbEval*);
-typedef void (*PFN_ngxb_release)(void);
-}
+#include "../../tools/ngx_bridge/ngx_bridge.h"
 
 namespace gpu {
-
-// NGX's result, for the window thread (bbgoated's anti-aliasing coupling).
-std::atomic<bool> g_dlaa_ngx_ok{false};
-// Failed for the session after NGX started (fail_locked), and idle: ten seconds
-// of 3D frames since the last DLAA frame. Either way the game's anti-aliasing
-// is not held off for it (dlaa_running).
-std::atomic<bool> g_dlaa_off{false};
-std::atomic<bool> g_dlaa_idle{false};
-
 namespace {
 
-[[maybe_unused]] constexpr int kBridgeVersion = 1;  // this and ngx_log: Windows only
+[[maybe_unused]] constexpr int kBridgeVersion = NGXB_VERSION;
 bool ngx_failed(std::uint32_t r) { return (r & 0xFFF00000u) == 0xBAD00000u; }
 
 // NVSDK_NGX_DLSS_Feature_Flags: IsHDR | MVLowRes | AutoExposure. Depth is
@@ -78,19 +47,51 @@ struct Bridge {
     PFN_ngxb_required_extensions required = nullptr;
     PFN_ngxb_init init = nullptr;
     PFN_ngxb_create create = nullptr;
+    PFN_ngxb_create_sr create_sr = nullptr;
     PFN_ngxb_evaluate evaluate = nullptr;
     PFN_ngxb_release release = nullptr;
+    PFN_ngxb_fg_extensions fg_extensions = nullptr;
 } g_bridge;
 
 std::string g_dir;  // the exe's folder: the bridge and nvngx_dlss.dll
 
+std::string dlss_mode() {
+    const int mode = host_startup_settings().dlss_mode;
+    return host::DlssModes[mode >= 0 && mode < 6 ? mode : 0];
+}
+
+int sr_quality() {
+    // Without an explicit larger output, retain native DLAA rather than
+    // jittering the scene and then skipping reconstruction entirely.
+    const auto mode = dlss_mode();
+    if (mode == "quality") return 1;
+    if (mode == "balanced") return 2;
+    if (mode == "performance") return 3;
+    if (mode == "ultra_performance") return 4;
+    return 0;
+}
+
 bool config_on() {
     static const bool on = [] {
         if (const char* e = std::getenv("BBHOST_DLAA")) return e[0] != '0';
+        const auto mode = dlss_mode();
+        if (!mode.empty()) return mode != "off";
         const std::string v = config_value("dlaa.enabled");
         return !(v == "false" || v == "0" || v == "off");
     }();
     return on;
+}
+
+bool fsr_selected() { return host_startup_settings().upscaler_backend != 0; }
+
+bool ngx_requested() {
+    const auto& settings = host_startup_settings();
+    return (config_on() && !fsr_selected()) ||
+           (settings.frame_generation && settings.frame_generation_backend == 0);
+}
+
+bool guides_only() {
+    return dlss_sr_is_active() || fsr_selected() || !config_on();
 }
 
 std::uint32_t config_preset() {
@@ -104,8 +105,8 @@ std::uint32_t config_preset() {
 bool load_bridge() {
     if (g_bridge.tried) return g_bridge.evaluate != nullptr;
     g_bridge.tried = true;
-    if (!config_on()) {
-        host_log("dlaa: off (dlaa.enabled / BBHOST_DLAA)");
+    if (!ngx_requested()) {
+        host_log("temporal: NGX is not requested for the selected providers");
         return false;
     }
 #if defined(_WIN32)
@@ -124,10 +125,12 @@ bool load_bridge() {
     g_bridge.required = reinterpret_cast<PFN_ngxb_required_extensions>(get("ngxb_required_extensions"));
     g_bridge.init = reinterpret_cast<PFN_ngxb_init>(get("ngxb_init"));
     g_bridge.create = reinterpret_cast<PFN_ngxb_create>(get("ngxb_create"));
+    g_bridge.create_sr = reinterpret_cast<PFN_ngxb_create_sr>(get("ngxb_create_sr"));
     g_bridge.evaluate = reinterpret_cast<PFN_ngxb_evaluate>(get("ngxb_evaluate"));
     g_bridge.release = reinterpret_cast<PFN_ngxb_release>(get("ngxb_release"));
+    g_bridge.fg_extensions = reinterpret_cast<PFN_ngxb_fg_extensions>(get("ngxb_fg_extensions"));
     if (!g_bridge.version || g_bridge.version() != kBridgeVersion || !g_bridge.required || !g_bridge.init || !g_bridge.create ||
-        !g_bridge.evaluate || !g_bridge.release) {
+        !g_bridge.evaluate || !g_bridge.release || !g_bridge.create_sr) {
         host_log("dlaa: ngx_bridge.dll is not version %d; off", kBridgeVersion);
         g_bridge.evaluate = nullptr;
         return false;
@@ -172,7 +175,7 @@ struct State {
     VkFormat color_format = VK_FORMAT_UNDEFINED;
     bool feature = false;
     bool reset = true;
-    Image output, depth, motion;
+    Image output, depth, motion, object_fallback;
     bool output_same_format = true;
     // A new frame at the anchor: depth-writing draws since the last one. The
     // command processor can lag the CPU's flips, so the flip count alone
@@ -180,7 +183,6 @@ struct State {
     std::uint64_t depth_writes = 0, depth_writes_at_anchor = ~0ull;
     std::uint64_t anchors_this_frame = 0, anchors_last_frame = 0;
     std::uint64_t anchor_calls = 0, first_depth_flip = 0;
-    std::uint64_t last_eval_flip = 0;  // bbgoated: the flip of the last frame DLAA resolved
     bool anchor_missing_said = false;
     std::uint64_t evaluations = 0, failures = 0;
     std::chrono::steady_clock::time_point last_eval{};
@@ -226,6 +228,35 @@ struct State {
     VkPipeline mv_pipeline = VK_NULL_HANDLE;
     bool mv_tried = false;
 } g_s;
+
+struct SrFeature {
+    std::uint32_t input_w = 0, input_h = 0, output_w = 0, output_h = 0;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    int quality = 0;
+    bool ready = false;
+    std::uint64_t evaluations = 0;
+} g_sr;
+Image g_sr_input, g_sr_output;
+std::uint32_t g_sr_image_iw = 0, g_sr_image_ih = 0, g_sr_image_ow = 0, g_sr_image_oh = 0;
+std::uint64_t g_sr_hud_anchor = 0;
+bool g_sr_render_failed = false;
+std::map<std::uint64_t, std::pair<std::uint32_t, std::uint32_t>> g_sr_display_sizes;
+
+// Immutable CPU metadata plus owned GPU copies for each guest display buffer.
+// The presenter checks the token queued with its flip before using a snapshot.
+struct FgSnapshot {
+    Image depth, motion, hudless;
+    DlssFgGuides guides{};
+};
+std::map<std::uint64_t, FgSnapshot> g_fg_snapshots;
+DlssFgGuides g_fg_current{};
+Image g_fg_hudless;
+std::uint32_t g_fg_hudless_w = 0, g_fg_hudless_h = 0;
+std::uint64_t g_fg_hudless_anchor = 0, g_fg_latched_anchor = 0, g_fg_next_frame = 0;
+
+bool fg_requested() {
+    return host_startup_settings().frame_generation;
+}
 
 // Halton(2, 3), 16 phases, centred: the jitter sequence.
 float halton(std::uint32_t i, std::uint32_t b) {
@@ -313,12 +344,13 @@ void camera_self_check(const float* f) {
 }
 
 bool make_mv_pipeline_locked() {
-    const VkDescriptorSetLayoutBinding binds[2] = {
+    const VkDescriptorSetLayoutBinding binds[3] = {
         {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
     };
     VkDescriptorSetLayoutCreateInfo sli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    sli.bindingCount = 2;
+    sli.bindingCount = 3;
     sli.pBindings = binds;
     if (vkCreateDescriptorSetLayout(g.device, &sli, nullptr, &g_s.mv_set_layout) != VK_SUCCESS) return false;
     VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, 96};
@@ -407,6 +439,62 @@ void to_general(VkCommandBuffer cmd, Image& im) {
     im.general = true;
 }
 
+bool fg_resize_image_locked(Image& image, std::uint32_t width, std::uint32_t height, VkFormat format) {
+    return make_image(image, width, height, format, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+}
+
+void fg_copy_locked(VkCommandBuffer cmd, VkImage source, Image& destination, std::uint32_t width, std::uint32_t height) {
+    to_general(cmd, destination);
+    VkImageCopy copy{};
+    copy.srcSubresource = copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.extent = {width, height, 1};
+    vkCmdCopyImage(cmd, source, VK_IMAGE_LAYOUT_GENERAL, destination.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+}
+
+void fg_latch_locked(const DrawRec& draw) {
+    if (!fg_requested() || std::strncmp(draw.name, "89cda9e4+", 9) || !draw.rt0) return;
+    auto& snapshot = g_fg_snapshots[draw.rt0];
+    snapshot.guides.valid = false;
+    snapshot.guides.frame_index = ++g_fg_next_frame;
+    if (!g_fg_current.valid || !g_fg_current.frame_index || g_fg_current.frame_index == g_fg_latched_anchor ||
+        g_fg_hudless_anchor != g_fg_current.frame_index || !g_fg_hudless.image) return;
+    g_fg_latched_anchor = g_fg_current.frame_index;
+    const auto w = g_fg_current.width, h = g_fg_current.height;
+    const auto hw = g_fg_hudless_w, hh = g_fg_hudless_h;
+    if (!snapshot.depth.image || !snapshot.motion.image || !snapshot.hudless.image ||
+        snapshot.guides.width != w || snapshot.guides.height != h ||
+        snapshot.guides.hudless_width != hw || snapshot.guides.hudless_height != hh ||
+        snapshot.hudless.format != g_fg_hudless.format) {
+        flush_locked();
+        destroy_image(snapshot.depth); destroy_image(snapshot.motion); destroy_image(snapshot.hudless);
+        if (!fg_resize_image_locked(snapshot.depth, w, h, VK_FORMAT_R32_SFLOAT) ||
+            !fg_resize_image_locked(snapshot.motion, w, h, VK_FORMAT_R16G16_SFLOAT) ||
+            !fg_resize_image_locked(snapshot.hudless, hw, hh, g_fg_hudless.format)) {
+            destroy_image(snapshot.depth); destroy_image(snapshot.motion); destroy_image(snapshot.hudless);
+            return;
+        }
+    }
+    begin_recording_locked(); render_end_pass_locked();
+    auto cmd = g_cmd(); memory_barrier(cmd);
+    fg_copy_locked(cmd, g_s.depth.image, snapshot.depth, w, h);
+    fg_copy_locked(cmd, g_s.motion.image, snapshot.motion, w, h);
+    fg_copy_locked(cmd, g_fg_hudless.image, snapshot.hudless, hw, hh);
+    memory_barrier(cmd);
+    const auto frame = snapshot.guides.frame_index;
+    snapshot.guides = g_fg_current;
+    snapshot.guides.frame_index = frame;
+    snapshot.guides.depth = snapshot.depth.image; snapshot.guides.depth_view = snapshot.depth.view;
+    snapshot.guides.motion = snapshot.motion.image; snapshot.guides.motion_view = snapshot.motion.view;
+    snapshot.guides.hudless = snapshot.hudless.image; snapshot.guides.hudless_view = snapshot.hudless.view;
+    snapshot.guides.hudless_format = snapshot.hudless.format;
+    snapshot.guides.hudless_width = hw; snapshot.guides.hudless_height = hh;
+    static std::uint64_t captured = 0;
+    if (++captured == 1 || captured % 300 == 0)
+        host_log("framegen: captured %llu complete guide snapshots, scene %ux%u, HUD-less %ux%u",
+                 static_cast<unsigned long long>(captured), w, h, hw, hh);
+}
+
 [[maybe_unused]] void ngx_log(const char* message) { host_log("dlaa: %s", message); }
 
 bool init_ngx_locked() {
@@ -427,7 +515,6 @@ bool init_ngx_locked() {
     const std::uint32_t r = g_bridge.init(g.instance, g.phys, g.device, vkGetInstanceProcAddr, vkGetDeviceProcAddr, dll_dir.c_str(),
                                           data_dir.c_str(), &ngx_log);
     g_s.ngx_ok = !ngx_failed(r);
-    g_dlaa_ngx_ok.store(g_s.ngx_ok, std::memory_order_release);
     host_log("dlaa: NGX init %s (0x%08x)%s", g_s.ngx_ok ? "ok" : "failed", r,
              g_s.ngx_ok ? "" : " - needs an NVIDIA RTX GPU and nvngx_dlss.dll beside bbhost.exe; the game renders unchanged");
 #endif
@@ -435,8 +522,10 @@ bool init_ngx_locked() {
 }
 
 void release_locked() {
-    if (g_s.feature || g_s.output.image) flush_locked();  // NGX's and our images idle before they go
-    if (g_s.feature) g_bridge.release();
+    if (g_s.feature || g_sr.ready || g_s.output.image) flush_locked();  // NGX's and our images idle before they go
+    if (g_s.feature || g_sr.ready) g_bridge.release();
+    fsr_shutdown_locked();
+    g_sr = {};
     g_s.feature = false;
     destroy_image(g_s.output);
     destroy_image(g_s.depth);
@@ -448,21 +537,23 @@ void fail_locked(const char* why) {
     host_log("dlaa: %s - off for this session; the game renders unchanged", why);
     release_locked();
     g_s.failed = true;
-    g_dlaa_off.store(true, std::memory_order_release);
 }
 
 // Images and the DLSS feature for a scene of this size and format. False
 // when they are not ready to evaluate this frame (just created, or failed).
 bool ensure_locked(std::uint32_t w, std::uint32_t h, VkFormat color_format) {
-    if (g_s.feature && g_s.width == w && g_s.height == h && g_s.color_format == color_format) return true;
+    const bool sr = guides_only();
+    if ((sr ? bool(g_s.depth.image) : g_s.feature) && g_s.width == w && g_s.height == h && g_s.color_format == color_format) return true;
     release_locked();
     g_s.output_same_format = storage_ok(color_format);
     const VkFormat out_format = g_s.output_same_format ? color_format : VK_FORMAT_R16G16B16A16_SFLOAT;
     if (!make_image(g_s.output, w, h, out_format,
                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ||
-        !make_image(g_s.depth, w, h, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT) ||
+        !make_image(g_s.depth, w, h, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ||
         !make_image(g_s.motion, w, h, VK_FORMAT_R16G16_SFLOAT,
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
         fail_locked("creating DLAA's images failed");
         return false;
     }
@@ -478,14 +569,14 @@ bool ensure_locked(std::uint32_t w, std::uint32_t h, VkFormat color_format) {
     vkCmdClearColorImage(cmd, g_s.motion.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
     memory_barrier(cmd);
     const std::uint32_t preset = config_preset();
-    const std::uint32_t r = g_bridge.create(cmd, w, h, preset, kFlagIsHdr | kFlagMvLowRes | kFlagAutoExposure);
+    const std::uint32_t r = sr ? 1u : g_bridge.create(cmd, w, h, preset, kFlagIsHdr | kFlagMvLowRes | kFlagAutoExposure);
     if (ngx_failed(r)) {
         char why[96];
         std::snprintf(why, sizeof(why), "creating the DLSS feature at %ux%u failed (0x%08x)", w, h, r);
         fail_locked(why);
         return false;
     }
-    g_s.feature = true;
+    g_s.feature = !sr;
     g_s.width = w;
     g_s.height = h;
     g_s.color_format = color_format;
@@ -573,11 +664,209 @@ std::atomic<bool> g_dlaa_cb_capturing{false};
 thread_local int t_dlaa_cb_stage = -1;
 thread_local bool t_dlaa_main_draw = false;
 
+std::uint64_t dlaa_fg_frame_id_locked(std::uint64_t display_va) {
+    const auto found = g_fg_snapshots.find(display_va);
+    return found == g_fg_snapshots.end() ? 0 : found->second.guides.frame_index;
+}
+
+bool dlaa_get_fg_guides_locked(std::uint64_t display_va, std::uint64_t expected_frame_id, DlssFgGuides* out) {
+    if (!out || !expected_frame_id) return false;
+    const auto found = g_fg_snapshots.find(display_va);
+    if (found == g_fg_snapshots.end() || !found->second.guides.valid ||
+        found->second.guides.frame_index != expected_frame_id) return false;
+    *out = found->second.guides;
+    return true;
+}
+
+void dlaa_capture_hudless_locked(RtImage* source, std::uint32_t logical_width, std::uint32_t logical_height) {
+    if (!fg_requested() || !g_fg_current.valid || !source || !source->initialised || source->depth ||
+        !logical_width || !logical_height || logical_width > source->width || logical_height > source->height ||
+        g_fg_hudless_anchor == g_fg_current.frame_index) return;
+    if (!g_fg_hudless.image || g_fg_hudless_w != logical_width || g_fg_hudless_h != logical_height ||
+        g_fg_hudless.format != source->format) {
+        flush_locked(); destroy_image(g_fg_hudless);
+        if (!fg_resize_image_locked(g_fg_hudless, logical_width, logical_height, source->format)) {
+            destroy_image(g_fg_hudless);
+            return;
+        }
+        g_fg_hudless_w = logical_width; g_fg_hudless_h = logical_height;
+    }
+    begin_recording_locked(); render_end_pass_locked();
+    const auto cmd = g_cmd(); memory_barrier(cmd);
+    fg_copy_locked(cmd, source->image, g_fg_hudless, logical_width, logical_height);
+    memory_barrier(cmd);
+    g_fg_hudless_anchor = g_fg_current.frame_index;
+}
+
+// SR's renderer module supplies the output override; native DLAA retains the
+// existing display target. This is replaced when the SR renderer is wired.
+bool dlaa_get_display_override_locked(std::uint64_t, void**, std::uint32_t*, std::uint32_t*, std::uint32_t*) { return false; }
+
+bool dlss_sr_is_active() {
+    // FSR native AA uses the same pre-HUD reconstruction stage as upscaling.
+    // The public name remains for the renderer's existing resolution hooks.
+    if (fsr_selected())
+        return config_on() && !g_sr_render_failed &&
+               g_s.enabled.load(std::memory_order_relaxed) && !g_s.failed;
+    return config_on() && sr_quality() != 0 && !g_sr_render_failed &&
+           static_cast<std::uint32_t>(host_startup_settings().output_width) > g_s.main_w &&
+           static_cast<std::uint32_t>(host_startup_settings().output_height) > g_s.main_h &&
+           g_s.enabled.load(std::memory_order_relaxed) && !g_s.failed;
+}
+
+void dlss_sr_get_dimensions(std::uint32_t in_w, std::uint32_t in_h, std::uint32_t* out_w, std::uint32_t* out_h) {
+    *out_w = host_startup_settings().output_width > 0 ? static_cast<std::uint32_t>(host_startup_settings().output_width) : in_w;
+    *out_h = host_startup_settings().output_height > 0 ? static_cast<std::uint32_t>(host_startup_settings().output_height) : in_h;
+}
+
+bool dlss_sr_evaluate_locked(VkCommandBuffer, VkImage input, VkImageView input_view, VkFormat input_format,
+                             std::uint32_t in_w, std::uint32_t in_h, VkImage output, VkImageView output_view,
+                             VkFormat output_format, std::uint32_t out_w, std::uint32_t out_h) {
+    if (!dlss_sr_is_active() || !g_fg_current.valid || !input || !output ||
+        g_fg_current.width != in_w || g_fg_current.height != in_h) return false;
+    if (fsr_selected()) {
+        auto guides = g_fg_current;
+        guides.depth = g_s.depth.image; guides.depth_view = g_s.depth.view;
+        guides.motion = g_s.motion.image; guides.motion_view = g_s.motion.view;
+        const NgxbImage color{input, input_view, input_format, in_w, in_h, VK_IMAGE_ASPECT_COLOR_BIT};
+        const NgxbImage target{output, output_view, output_format, out_w, out_h, VK_IMAGE_ASPECT_COLOR_BIT};
+        render_end_pass_locked();
+        memory_barrier(g_cmd());
+        const bool ok = fsr_upscale_locked(g.phys, g.device, g_cmd(), color, target,
+                                           guides, g.flushes, g.completed_submits);
+        memory_barrier(g_cmd());
+        if (!ok) g_s.reset = true;
+        return ok;
+    }
+    if (!init_ngx_locked()) return false;
+    const int quality = sr_quality();
+    if (!g_sr.ready || g_sr.input_w != in_w || g_sr.input_h != in_h || g_sr.output_w != out_w ||
+        g_sr.output_h != out_h || g_sr.format != input_format || g_sr.quality != quality) {
+        // NGX owns only one SR feature. Its old command submissions must finish
+        // before replacement; acquire the current recording buffer after flushing.
+        flush_locked();
+        begin_recording_locked();
+        render_end_pass_locked();
+        const auto result = g_bridge.create_sr(g_cmd(), in_w, in_h, out_w, out_h, quality,
+                                               config_preset(), kFlagMvLowRes | kFlagAutoExposure);
+        if (ngx_failed(result)) {
+            host_log("dlss: SR create failed (0x%08x)", result);
+            g_sr.ready = false;
+            g_sr_render_failed = true;
+            g_s.reset = true;
+            return false;
+        }
+        g_sr = {in_w, in_h, out_w, out_h, input_format, quality, true, 0};
+        g_fg_current.reset = 1;
+        host_log("dlss: SR ready, %ux%u -> %ux%u, quality %d", in_w, in_h, out_w, out_h, quality);
+    }
+    render_end_pass_locked();
+    memory_barrier(g_cmd());
+    NgxbEval evaluation{};
+    evaluation.color = {input, input_view, input_format, in_w, in_h, VK_IMAGE_ASPECT_COLOR_BIT};
+    evaluation.output = {output, output_view, output_format, out_w, out_h, VK_IMAGE_ASPECT_COLOR_BIT};
+    evaluation.depth = {g_s.depth.image, g_s.depth.view, g_s.depth.format, in_w, in_h, VK_IMAGE_ASPECT_COLOR_BIT};
+    evaluation.motion = {g_s.motion.image, g_s.motion.view, g_s.motion.format, in_w, in_h, VK_IMAGE_ASPECT_COLOR_BIT};
+    evaluation.jitter_x = g_fg_current.jitter_x;
+    evaluation.jitter_y = g_fg_current.jitter_y;
+    evaluation.mv_scale_x = evaluation.mv_scale_y = 1.0f;
+    evaluation.reset = g_fg_current.reset;
+    evaluation.frame_ms = g_fg_current.frame_ms;
+    const auto result = g_bridge.evaluate(g_cmd(), &evaluation);
+    memory_barrier(g_cmd());
+    if (ngx_failed(result)) {
+        host_log("dlss: SR evaluate failed (0x%08x)", result);
+        g_s.reset = true;
+        g_sr_render_failed = true;
+        return false;
+    }
+    if (++g_sr.evaluations == 1 || g_sr.evaluations % 300 == 0)
+        host_log("dlss: SR evaluated %llu frames", static_cast<unsigned long long>(g_sr.evaluations));
+    return true;
+}
+
+bool dlss_sr_upscale_hud_locked(RtImage* source, std::uint32_t in_w, std::uint32_t in_h,
+                                std::uint32_t* out_w, std::uint32_t* out_h) {
+    if (!source || !source->initialised || source->depth || !dlss_sr_is_active() ||
+        !g_fg_current.valid || g_fg_current.width != in_w || g_fg_current.height != in_h) return false;
+    dlss_sr_get_dimensions(in_w, in_h, out_w, out_h);
+    if (!in_w || !in_h || *out_w < in_w || *out_h < in_h ||
+        *out_w > source->width || *out_h > source->height || !storage_ok(source->format)) {
+        host_log("dlss: requested output does not fit the HUD target; falling back to native DLAA");
+        g_sr_render_failed = true; g_s.reset = true;
+        return false;
+    }
+    if (g_sr_hud_anchor == g_fg_current.frame_index) return true;
+    const auto sr_format = fsr_selected() && source->format == VK_FORMAT_B8G8R8A8_UNORM ?
+                           VK_FORMAT_R8G8B8A8_UNORM : source->format;
+    // The pinned FSR accumulation shader declares rgba16f storage output.
+    // Keep SDR input as SDR; only the owned reconstruction output needs FP16.
+    const auto output_format = fsr_selected() ? VK_FORMAT_R16G16B16A16_SFLOAT : sr_format;
+    if (!g_sr_input.image || !g_sr_output.image || g_sr_image_iw != in_w || g_sr_image_ih != in_h ||
+        g_sr_image_ow != *out_w || g_sr_image_oh != *out_h || g_sr_input.format != sr_format ||
+        g_sr_output.format != output_format) {
+        flush_locked(); destroy_image(g_sr_input); destroy_image(g_sr_output);
+        if (!fg_resize_image_locked(g_sr_input, in_w, in_h, sr_format) ||
+            !fg_resize_image_locked(g_sr_output, *out_w, *out_h, output_format)) {
+            destroy_image(g_sr_input); destroy_image(g_sr_output);
+            return false;
+        }
+        g_sr_image_iw = in_w; g_sr_image_ih = in_h;
+        g_sr_image_ow = *out_w; g_sr_image_oh = *out_h;
+    }
+    begin_recording_locked(); render_end_pass_locked();
+    memory_barrier(g_cmd());
+    if (sr_format == source->format) {
+        fg_copy_locked(g_cmd(), source->image, g_sr_input, in_w, in_h);
+    } else {
+        to_general(g_cmd(), g_sr_input);
+        VkImageBlit blit{};
+        blit.srcSubresource = blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.srcOffsets[1] = blit.dstOffsets[1] = {static_cast<int>(in_w), static_cast<int>(in_h), 1};
+        vkCmdBlitImage(g_cmd(), source->image, VK_IMAGE_LAYOUT_GENERAL, g_sr_input.image,
+                       VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_NEAREST);
+    }
+    to_general(g_cmd(), g_sr_output);
+    memory_barrier(g_cmd());
+    if (!dlss_sr_evaluate_locked(g_cmd(), g_sr_input.image, g_sr_input.view, g_sr_input.format,
+                                 in_w, in_h, g_sr_output.image, g_sr_output.view, g_sr_output.format,
+                                 *out_w, *out_h)) return false;
+    VkImageCopy copy{};
+    copy.srcSubresource = copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.extent = {*out_w, *out_h, 1};
+    if (output_format == source->format) {
+        vkCmdCopyImage(g_cmd(), g_sr_output.image, VK_IMAGE_LAYOUT_GENERAL, source->image,
+                       VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+    } else {
+        VkImageBlit blit{};
+        blit.srcSubresource = blit.dstSubresource = copy.srcSubresource;
+        blit.srcOffsets[1] = blit.dstOffsets[1] = {static_cast<int>(*out_w), static_cast<int>(*out_h), 1};
+        vkCmdBlitImage(g_cmd(), g_sr_output.image, VK_IMAGE_LAYOUT_GENERAL, source->image,
+                       VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_NEAREST);
+    }
+    memory_barrier(g_cmd());
+    source->fill_last = false;
+    g_sr_hud_anchor = g_fg_current.frame_index;
+    return true;
+}
+
+bool dlss_sr_display_dimensions_locked(std::uint64_t display_va, std::uint32_t* width, std::uint32_t* height) {
+    const auto it = g_sr_display_sizes.find(display_va);
+    if (!dlss_sr_is_active() || it == g_sr_display_sizes.end()) return false;
+    *width = it->second.first; *height = it->second.second;
+    return true;
+}
+
 bool dlaa_main_draw_locked(std::uint64_t depth, std::uint32_t depth_ctl, std::uint32_t prim, std::uint32_t count) {
     // Depth-tested draws into the scene's depth (Z_ENABLE), but not the
     // screen-space quads that test it too (the deferred lights: 4-vertex
     // strips, rect lists): shifting those would resample what they read.
     return depth && depth == g_s.main_depth && (depth_ctl & 0x2) && !((prim == 6 || prim == 0x11) && count <= 4);
+}
+
+bool dlaa_motion_active_locked() {
+    return (config_on() || fg_requested()) &&
+           g_s.enabled.load(std::memory_order_relaxed) && !g_s.failed;
 }
 
 void dlaa_jitter_locked(float* x, float* y) {
@@ -608,6 +897,13 @@ void dlaa_add_instance_extensions(std::vector<const char*>& exts) {
     std::vector<VkExtensionProperties> avail(n);
     vkEnumerateInstanceExtensionProperties(nullptr, &n, avail.data());
     for (std::uint32_t i = 0; i < ni; ++i) add_missing(exts, inst[i], avail, "instance");
+    std::uint32_t nf = 0;
+    const VkExtensionProperties* fg = nullptr;
+    const std::wstring directory = std::filesystem::path(g_dir).wstring();
+    // bbgoated: frame generation's NGX extensions only when it is requested (it is not ported).
+    if (fg_requested() && g_bridge.fg_extensions && !ngx_failed(g_bridge.fg_extensions(VK_NULL_HANDLE, VK_NULL_HANDLE,
+            directory.c_str(), &nf, &fg)))
+        for (std::uint32_t i = 0; i < nf; ++i) add_missing(exts, fg[i].extensionName, avail, "FG instance");
 }
 
 void dlaa_add_device_extensions(VkPhysicalDevice phys, std::vector<const char*>& exts) {
@@ -628,12 +924,24 @@ void dlaa_add_device_extensions(VkPhysicalDevice phys, std::vector<const char*>&
     std::vector<VkExtensionProperties> avail(n);
     vkEnumerateDeviceExtensionProperties(phys, nullptr, &n, avail.data());
     for (std::uint32_t i = 0; i < nd; ++i) add_missing(exts, dev[i], avail, "device");
-    // bbgoated (as FIocker's PR #73): the renderer enables Vulkan 1.2's core
-    // bufferDeviceAddress, and NGX's list also names the pre-core EXT version;
-    // enabling both breaks the device-creation rules. NGX uses the core entry.
-    exts.erase(std::remove_if(exts.begin(), exts.end(),
-                              [](const char* name) { return !std::strcmp(name, "VK_EXT_buffer_device_address"); }),
-               exts.end());
+    std::uint32_t nf = 0;
+    const VkExtensionProperties* fg = nullptr;
+    const std::wstring directory = std::filesystem::path(g_dir).wstring();
+    // bbgoated: frame generation's NGX extensions only when it is requested (it is not ported).
+    if (fg_requested() && g_bridge.fg_extensions && !ngx_failed(g_bridge.fg_extensions(g.instance, phys,
+            directory.c_str(), &nf, &fg)))
+        for (std::uint32_t i = 0; i < nf; ++i) add_missing(exts, fg[i].extensionName, avail, "FG device");
+    // The renderer enables Vulkan 1.2 bufferDeviceAddress. NGX's extension
+    // union also names the incompatible pre-core EXT version; enabling both
+    // violates device creation requirements. NGX uses the core address entry.
+    const auto before = exts.size();
+    exts.erase(std::remove_if(exts.begin(), exts.end(), [](const char* name) {
+        return !std::strcmp(name, "VK_EXT_buffer_device_address");
+    }), exts.end());
+    // bbgoated: say so - add_missing logged it as added a moment ago.
+    if (exts.size() != before)
+        host_log("dlaa: VK_EXT_buffer_device_address dropped: the core bufferDeviceAddress feature is on "
+                 "(VUID-VkDeviceCreateInfo-pNext-04748)");
 }
 
 // The first post-process draw: YEBIS's copy of the lit HDR scene (RGBA16F, the
@@ -653,6 +961,15 @@ bool dlaa_is_anchor(const std::string& name) {
 }
 
 void dlaa_after_draw_locked(const DrawRec& r) {
+    if (r.rt0 && !std::strncmp(r.name, "89cda9e4+", 9)) {
+        g_sr_display_sizes.erase(r.rt0);
+        if (dlss_sr_is_active() && g_fg_current.valid && g_sr_hud_anchor == g_fg_current.frame_index)
+            g_sr_display_sizes[r.rt0] = {g_sr_image_ow, g_sr_image_oh};
+    }
+    fg_latch_locked(r);
+    // A final copy consumes this scene. Menus/loading frames without a new
+    // HDR anchor must not reuse its SR success or camera/depth guides.
+    if (r.rt0 && !std::strncmp(r.name, "89cda9e4+", 9)) g_fg_current.valid = false;
     // Z_ENABLE and Z_WRITE_ENABLE (DB_DEPTH_CONTROL bits 1, 2): a draw into the depth.
     if (r.depth && (r.depth_ctl & 0x6) == 0x6) {
         State::Depth* slot = nullptr;
@@ -680,13 +997,6 @@ void dlaa_after_draw_locked(const DrawRec& r) {
                 g_s.anchor_missing_said = true;
                 host_log("dlaa: 600 flips of 3D frames without the anchor pipeline; DLAA is not running (BBHOST_DLAA_ANCHOR names another)");
             }
-        }
-        // bbgoated: 3D frames for ten seconds since the last DLAA frame (no anchor,
-        // or none with its scene and depth): DLAA is idle, and the game's
-        // anti-aliasing is not held off for it until DLAA resolves frames again.
-        if (g_s.last_eval_flip && slot->flip > g_s.last_eval_flip + 600 && !g_dlaa_idle.load(std::memory_order_relaxed)) {
-            g_dlaa_idle.store(true, std::memory_order_relaxed);
-            host_log("dlaa: 600 flips of 3D frames since the last DLAA frame; the game's anti-aliasing is not held off until DLAA runs again");
         }
     }
     if (g_cb.phase != 2 || !g_dlaa_cb_capturing.load(std::memory_order_relaxed)) {
@@ -821,12 +1131,30 @@ bool record_motion_locked(VkCommandBuffer cmd, const float reproject[16], float 
         host_log("dlaa: camera motion vectors %s", g_s.mv_pipeline ? "ready" : "unavailable (pipeline creation failed); zero motion");
     }
     if (!g_s.mv_pipeline) return false;
+    if (!g_s.object_fallback.image) {
+        if (!make_image(g_s.object_fallback, 1, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
+                        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+            destroy_image(g_s.object_fallback);
+            return false;
+        }
+        to_general(cmd, g_s.object_fallback);
+        const VkClearColorValue clear{};
+        const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdClearColorImage(cmd, g_s.object_fallback.image, VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &range);
+        memory_barrier(cmd);
+    }
+    const VkImageView objects = object_motion_read_locked(g_s.main_depth, g_s.width, g_s.height, g_s.reset);
+    // Optional readback diagnostics can submit this buffer; bind the compute
+    // pass into the current recording rather than an already-submitted one.
+    begin_recording_locked();
+    cmd = g_cmd();
     const VkDescriptorSet set = alloc_set_locked(g_s.mv_set_layout);
     if (!set) return false;
     const VkDescriptorImageInfo depth_info{VK_NULL_HANDLE, g_s.depth.view, VK_IMAGE_LAYOUT_GENERAL};
     const VkDescriptorImageInfo motion_info{VK_NULL_HANDLE, g_s.motion.view, VK_IMAGE_LAYOUT_GENERAL};
-    VkWriteDescriptorSet w[2] = {};
-    for (int k = 0; k < 2; ++k) {
+    const VkDescriptorImageInfo object_info{VK_NULL_HANDLE, objects ? objects : g_s.object_fallback.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet w[3] = {};
+    for (int k = 0; k < 3; ++k) {
         w[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[k].dstSet = set;
         w[k].dstBinding = static_cast<std::uint32_t>(k);
@@ -835,13 +1163,16 @@ bool record_motion_locked(VkCommandBuffer cmd, const float reproject[16], float 
     }
     w[0].pImageInfo = &depth_info;
     w[1].pImageInfo = &motion_info;
-    vkUpdateDescriptorSets(g.device, 2, w, 0, nullptr);
+    w[2].pImageInfo = &object_info;
+    vkUpdateDescriptorSets(g.device, 3, w, 0, nullptr);
     struct Push {
         float reproject[16];
         float jitter[2];
         std::uint32_t size[2];
         std::uint32_t zero;
-        std::uint32_t pad[3];
+        std::uint32_t objects;
+        float projection_z;
+        std::uint32_t pad;
     } push{};
     static_assert(sizeof(Push) == 96, "the shader's push block");
     std::memcpy(push.reproject, reproject, sizeof(push.reproject));
@@ -850,6 +1181,8 @@ bool record_motion_locked(VkCommandBuffer cmd, const float reproject[16], float 
     push.size[0] = g_s.width;
     push.size[1] = g_s.height;
     push.zero = zero ? 1u : 0u;
+    push.objects = objects && !zero ? 1u : 0u;
+    push.projection_z = g_s.cam_cur_ok ? g_s.cam_cur[62] : 1.0f;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_s.mv_pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_s.mv_layout, 0, 1, &set, 0, nullptr);
     vkCmdPushConstants(cmd, g_s.mv_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
@@ -869,6 +1202,13 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
     g_s.depth_writes_at_anchor = g_s.depth_writes;
     g_s.anchors_last_frame = g_s.anchors_this_frame;
     g_s.anchors_this_frame = 1;
+    // Advance vertex history even if the temporal pass cannot evaluate this frame.
+    // Otherwise a later frame could match geometry from before a loading screen.
+    struct MotionFrameEnd {
+        bool invalidate = true;
+        ~MotionFrameEnd() { object_motion_finish_frame_locked(invalidate); }
+    } motion_frame;
+    g_fg_current.valid = false;
     // The jitter this frame's draws were given. The next frame's is set only
     // when this one evaluates.
     const float jx = g_s.jx, jy = g_s.jy;
@@ -889,16 +1229,6 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
     }
     for (State::Depth& d : g_s.depths) d.writes = 0;
     if (g_s.failed) return;
-    // BBHOST_TEST_DLAA_FAIL=<flip>: DLAA fails for the session at that flip once
-    // it has resolved frames - the anti-aliasing hold's release is tested with it.
-    static const std::uint64_t test_fail_flip = [] {
-        const char* e = std::getenv("BBHOST_TEST_DLAA_FAIL");
-        return e ? std::strtoull(e, nullptr, 10) : 0ull;
-    }();
-    if (test_fail_flip && flip >= test_fail_flip && g_s.evaluations) {
-        fail_locked("BBHOST_TEST_DLAA_FAIL");
-        return;
-    }
     if (!scene) {
         ++g_s.skipped;
         if (g_s.skipped_run++ == 0) {
@@ -941,7 +1271,8 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
         g_s.reset = true;
         return;
     }
-    if (!init_ngx_locked()) {
+    if (!config_on() && !fg_requested()) return;
+    if (ngx_requested() && !init_ngx_locked() && !fsr_selected()) {
         g_s.failed = true;
         return;
     }
@@ -970,6 +1301,7 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
     }
     // Without the pass the motion image keeps its zero clear.
     record_motion_locked(cmd, reproject, jx, jy, !camera || g_s.mv_zero.load(std::memory_order_relaxed));
+    motion_frame.invalidate = !camera || cut;
     cmd = g_cmd();
     memory_barrier(cmd);
     const auto now = std::chrono::steady_clock::now();
@@ -986,21 +1318,60 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
     e.mv_scale_x = e.mv_scale_y = 1.0f;
     e.reset = g_s.reset ? 1 : 0;
     e.frame_ms = ms;
-    const std::uint32_t r = g_bridge.evaluate(cmd, &e);
+    const bool sr = guides_only();
+    const std::uint32_t r = sr ? 1u : g_bridge.evaluate(cmd, &e);
     if (ngx_failed(r)) {
         if (++g_s.failures <= 5) host_log("dlaa: evaluate failed (0x%08x)", r);
         if (g_s.failures >= 30) fail_locked("30 evaluations failed");
         return;
     }
+    if (camera && g_s.mv_pipeline) {
+        auto& guides = g_fg_current;
+        guides = {};
+        guides.valid = true;
+        guides.frame_index = g_s.evaluations + 1;
+        guides.render_frame_index = guides.frame_index;
+        guides.reflex_frame_id = 0;  // bbgoated: Reflex is not ported
+        guides.width = scene->width; guides.height = scene->height;
+        guides.depth_format = VK_FORMAT_R32_SFLOAT; guides.motion_format = VK_FORMAT_R16G16_SFLOAT;
+        guides.frame_ms = ms; guides.reset = e.reset;
+        guides.jitter_x = jx; guides.jitter_y = jy;
+        auto& camera_out = guides.camera;
+        const float* f = g_s.cam_cur;
+        Mat4 projection{}, inverse{};
+        for (int row = 0; row < 4; ++row) for (int col = 0; col < 4; ++col)
+            projection[row][col] = f[52 + row * 4 + col];
+        if (!mat_inverse(projection, inverse)) guides.valid = false;
+        for (int row = 0; row < 4; ++row) for (int col = 0; col < 4; ++col) {
+            camera_out.view_to_clip[row * 4 + col] = static_cast<float>(projection[col][row]);
+            camera_out.clip_to_view[row * 4 + col] = static_cast<float>(inverse[col][row]);
+        }
+        for (int row = 0; row < 4; ++row) for (int col = 0; col < 4; ++col)
+            projection[row][col] = reproject[row * 4 + col];
+        std::memcpy(camera_out.clip_to_previous, reproject, sizeof(camera_out.clip_to_previous));
+        if (!mat_inverse(projection, inverse)) guides.valid = false;
+        for (int row = 0; row < 4; ++row) for (int col = 0; col < 4; ++col)
+            camera_out.previous_to_clip[row * 4 + col] = static_cast<float>(inverse[row][col]);
+        for (int i = 0; i < 3; ++i) {
+            camera_out.position[i] = f[183 + i * 4];
+            camera_out.right[i] = f[180 + i * 4];
+            camera_out.up[i] = f[181 + i * 4];
+            camera_out.forward[i] = f[182 + i * 4];
+        }
+        camera_out.jitter[0] = jx; camera_out.jitter[1] = jy;
+        camera_out.near_plane = -f[63] / f[62];
+        camera_out.far_plane = f[0] > camera_out.near_plane ? f[0] : 3000.0f;
+        camera_out.vertical_fov = 2.0f * std::atan(1.0f / f[57]);
+    }
     cmd = g_cmd();
     memory_barrier(cmd);
-    if (g_s.output_same_format) {
+    if (!sr && g_s.output_same_format) {
         VkImageCopy c{};
         c.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         c.dstSubresource = c.srcSubresource;
         c.extent = {scene->width, scene->height, 1};
         vkCmdCopyImage(cmd, g_s.output.image, VK_IMAGE_LAYOUT_GENERAL, scene->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
-    } else {
+    } else if (!sr) {
         VkImageBlit b{};
         b.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         b.dstSubresource = b.srcSubresource;
@@ -1011,11 +1382,13 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
     memory_barrier(cmd);
     scene->fill_last = false;
     g_s.reset = false;
-    g_s.last_eval_flip = flip;
-    g_dlaa_idle.store(false, std::memory_order_relaxed);
-    // The next frame's jitter: Halton(2, 3) over 16 frames, centred.
-    if (g_s.jitter_mode.load(std::memory_order_relaxed) == 0) {
-        g_s.jitter_index = g_s.jitter_index % 16 + 1;
+    // FSR recommends eight phases times the square of the upscale ratio.
+    // Keep native DLSS's existing sequence; FG-only guide capture has no jitter.
+    if (config_on() && g_s.jitter_mode.load(std::memory_order_relaxed) == 0) {
+        const double ratio = static_cast<double>(host_startup_settings().output_width) /
+                             std::max(1u, scene->width);
+        const auto phases = fsr_selected() ? std::max(8u, static_cast<unsigned>(std::lround(8.0 * ratio * ratio))) : 16u;
+        g_s.jitter_index = g_s.jitter_index % phases + 1;
         g_s.jx = halton(g_s.jitter_index, 2) - 0.5f;
         g_s.jy = halton(g_s.jitter_index, 3) - 0.5f;
     }
@@ -1030,41 +1403,6 @@ void dlaa_anchor_locked(const std::uint64_t* sampled, int count) {
                  jy, static_cast<unsigned long long>(g_s.jittered_draws));
         g_s.jittered_draws = 0;
     }
-}
-
-}  // namespace gpu
-
-
-namespace gpu {
-
-bool dlaa_running() {
-    return dlaa_active(config_on(), g_dlaa_ngx_ok.load(std::memory_order_acquire), g_dlaa_off.load(std::memory_order_acquire),
-                       g_dlaa_idle.load(std::memory_order_relaxed), g_s.enabled.load(std::memory_order_relaxed));
-}
-
-// bbgoated: the pump loop's thread, every pass. While DLAA runs, the game's own
-// anti-aliasing is held off; it comes back when DLAA is turned off, if the
-// player had it on (host/dlaa_aa.h). Looked at only when DLAA or a setting changed.
-void dlaa_aa_tick() {
-    static bool last_active = false;
-    static std::uint64_t last_serial = 0;
-    const bool active = dlaa_running();
-    const std::uint64_t serial = host_opt_serial();
-    if (active == last_active && serial == last_serial) return;
-    last_active = active;
-    switch (dlaa_aa_step(active, host_opt_get("anti_alias"), host_opt_held("anti_alias"))) {
-    case kDlaaAaHold:
-        host_opt_hold("anti_alias", false);
-        host_log("dlaa: the game's anti-aliasing is off while DLAA runs (your setting is kept; it is back when DLAA is turned off)");
-        break;
-    case kDlaaAaRelease:
-        host_opt_release("anti_alias");
-        host_log("dlaa: the game's anti-aliasing is back to your setting (DLAA off)");
-        break;
-    case kDlaaAaKeep:
-        break;
-    }
-    last_serial = host_opt_serial();  // our own change is not news
 }
 
 }  // namespace gpu

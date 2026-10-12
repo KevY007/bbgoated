@@ -28,14 +28,12 @@
 #include <vector>
 
 #include <vulkan/vulkan.h>
+#include "../../tools/ngx_bridge/ngx_bridge.h"
 
 namespace gpu {
-// bbgoated: whether DLAA runs now (enabled, NGX ready, not switched off with Ctrl+F1).
-bool dlaa_running();
-// bbgoated, main.cpp's pump loop (with or without a window): the game's anti-aliasing held off while DLAA runs (host/dlaa_aa.h).
-void dlaa_aa_tick();
 
 struct DrawRec;
+struct RtImage;
 
 // gpu.cpp, before vkCreateInstance / vkCreateDevice: the extensions NGX asks
 // for, each added when the loader / device has it and the list does not.
@@ -56,6 +54,7 @@ void dlaa_after_draw_locked(const DrawRec& r);
 // not evaluating), and its vertex shader's constant buffers are offered to
 // dlaa_camera_note_locked (the 864-byte camera buffer, by its signature).
 bool dlaa_main_draw_locked(std::uint64_t depth, std::uint32_t depth_ctl, std::uint32_t prim, std::uint32_t count);
+bool dlaa_motion_active_locked();
 void dlaa_jitter_locked(float* x, float* y);
 void dlaa_camera_note_locked(std::uint64_t base, std::uint64_t bytes);
 extern thread_local bool t_dlaa_main_draw;
@@ -67,6 +66,49 @@ void dlaa_request_cb_capture(const std::string& dir);
 extern std::atomic<bool> g_dlaa_cb_capturing;
 extern thread_local int t_dlaa_cb_stage;  // 0 VS, 1 PS while a draw's buffers resolve; -1 otherwise
 void dlaa_cb_note_locked(std::size_t slot, std::uint64_t base, std::uint64_t bytes);
+
+// Frame Generation guides captured by the renderer, available under g.mu.
+struct DlssFgGuides {
+    VkImage depth = VK_NULL_HANDLE;
+    VkImageView depth_view = VK_NULL_HANDLE;
+    VkFormat depth_format = VK_FORMAT_UNDEFINED;
+    std::uint32_t width = 0, height = 0;
+
+    VkImage motion = VK_NULL_HANDLE;
+    VkImageView motion_view = VK_NULL_HANDLE;
+    VkFormat motion_format = VK_FORMAT_UNDEFINED;
+
+    VkImage hudless = VK_NULL_HANDLE;
+    VkImageView hudless_view = VK_NULL_HANDLE;
+    VkFormat hudless_format = VK_FORMAT_UNDEFINED;
+    std::uint32_t hudless_width = 0, hudless_height = 0;
+
+    NgxbCamera camera{};
+    float jitter_x = 0.0f, jitter_y = 0.0f;
+    float frame_ms = 16.66f;
+    std::int32_t reset = 1;
+    std::uint64_t frame_index = 0;
+    std::uint64_t reflex_frame_id = 0; // simulation ID, independent of temporal history
+    std::uint64_t render_frame_index = 0; // original HDR anchor, retained across display copies
+    bool valid = false;
+};
+std::uint64_t dlaa_fg_frame_id_locked(std::uint64_t display_va);
+bool dlaa_get_fg_guides_locked(std::uint64_t display_va, std::uint64_t expected_frame_id, DlssFgGuides* out);
+// Before the first colour HUD draw. Dimensions describe the logical scene,
+// which can occupy only the top-left region of a larger guest framebuffer.
+void dlaa_capture_hudless_locked(RtImage* source, std::uint32_t logical_width, std::uint32_t logical_height);
+
+bool dlss_sr_is_active();
+void dlss_sr_get_dimensions(std::uint32_t in_w, std::uint32_t in_h, std::uint32_t* out_w, std::uint32_t* out_h);
+bool dlss_sr_upscale_hud_locked(RtImage* source, std::uint32_t in_w, std::uint32_t in_h,
+                                std::uint32_t* out_w, std::uint32_t* out_h);
+bool dlss_sr_display_dimensions_locked(std::uint64_t display_va, std::uint32_t* width, std::uint32_t* height);
+bool dlss_sr_evaluate_locked(VkCommandBuffer cmd, VkImage input, VkImageView input_view, VkFormat input_format,
+                            std::uint32_t in_w, std::uint32_t in_h, VkImage output, VkImageView output_view,
+                            VkFormat output_format, std::uint32_t out_w, std::uint32_t out_h);
+
+bool dlaa_get_display_override_locked(std::uint64_t display_va, void** image, std::uint32_t* format,
+                                      std::uint32_t* width, std::uint32_t* height);
 
 // window.cpp: Ctrl+F<n>. True when DLAA took the key. F1 DLAA on/off (A/B),
 // F2 jitter on / off / test (DLSS skipped, jitter x8: the scene visibly

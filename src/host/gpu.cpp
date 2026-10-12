@@ -3,6 +3,7 @@
 #include "core/paced_file.h"
 #include "core/portable.h"
 #include "host/dlaa.h"
+#include "host/fsr_upscaler.h"
 #include "host/foreign_hooks.h"
 #include "host/draw_capture.h"
 #include "host/gpu_internal.h"
@@ -2127,6 +2128,7 @@ bool init_locked() {
     // DB_DEPTH_CONTROL bit 3: the deferred lights cull by depth range.
     VkPhysicalDeviceFeatures supported{};
     vkGetPhysicalDeviceFeatures(g.phys, &supported);
+    f2.features.shaderStorageImageExtendedFormats = supported.shaderStorageImageExtendedFormats;
     f2.features.shaderImageGatherExtended = supported.shaderImageGatherExtended;
     // BBHOST_RUNTIME_OFFSETS=0: the coordinates move even with the feature, to
     // compare the two.
@@ -4240,6 +4242,7 @@ void retire_slot_locked(int k) {
     // Fences on one queue complete in submission order, so every CP write
     // recorded into this submission or an earlier one is in memory now.
     g.completed_submits = std::max(g.completed_submits, sl.serial + 1);
+    fsr_retire_locked(g.completed_submits);
     for (auto it = g.pending_writes.begin(); it != g.pending_writes.end();) {
         it = it->second.serial < g.completed_submits ? g.pending_writes.erase(it) : std::next(it);
     }

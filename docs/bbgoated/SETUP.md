@@ -75,7 +75,7 @@ Patch switches go under `[patches]` in `%APPDATA%\bbgoated\bbgoated.toml`. Envir
 
 ### DLAA
 
-On an NVIDIA RTX card bbgoated runs NVIDIA's DLAA on the game's HDR scene, before its post-processing. It needs two NVIDIA files beside `bbgoated.exe`: `ngx_bridge.dll` and `nvngx_dlss.dll`. Packaged builds include them, with NVIDIA's license (`NVIDIA-DLSS-LICENSE.txt`). For a source build, copy them from the [DLAA fork's release](https://github.com/YoucefNabil/bbhost/releases). Without them, or on another GPU, the game renders exactly as in bbhost.
+On an NVIDIA RTX card bbgoated runs NVIDIA's DLAA on the game's HDR scene, before its post-processing. It needs two files beside `bbgoated.exe`: `ngx_bridge.dll` (version 2, built from `tools/ngx_bridge`) and NVIDIA's `nvngx_dlss.dll`. Packaged builds include them, with NVIDIA's license (`NVIDIA-DLSS-LICENSE.txt`). For a source build, build the bridge with Visual Studio against NVIDIA's DLSS SDK (`docs/dlaa.md`, "ngx_bridge") and copy `nvngx_dlss.dll` from the SDK. The DLAA fork's older bridge is refused: the log says `dlaa: ngx_bridge.dll is not version 2; off`. Without them, or on another GPU, the game renders exactly as in bbhost.
 
 - While DLAA runs, the game's own anti-aliasing (System > Graphics) is held off: on top of DLAA it would only blur. Your setting is kept in `bbgoated-options.toml`, and it comes back as soon as DLAA is turned off.
 - `Ctrl+F1` turns DLAA off and on while you play (`Ctrl+F5` does the same, for keyboards where another program takes `Ctrl+F1`). The log says `dlaa: on` or `dlaa: off`.

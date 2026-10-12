@@ -1,6 +1,7 @@
 #include "host/options.h"
 #include "host/updater.h"
 #include "host/settings.h"
+#include "host/display_settings.h"
 
 #include "host/bindings.h"
 #include "host/overlay.h"
@@ -747,6 +748,18 @@ void rebuild_settings() {
             h.res_height = static_cast<int>(hh);
         }
     }
+    // bbgoated (Phase 2 plan, Task 4 until Task 5 adds PR #73's F10 rows): the reconstruction
+    // settings from [dlss] mode or BBHOST_DLSS_MODE, DLSS only, and Off or DLAA - super resolution
+    // needs Task 5's output-size presentation. BBHOST_DLAA=0 turns it off.
+    {
+        std::string mode = config().dlss_mode;
+        if (const char* e = std::getenv("BBHOST_DLSS_MODE"); e && e[0]) mode = e;
+        h.dlss_mode = std::min(host::dlss_mode_index(mode), 1);
+        if (const char* e = std::getenv("BBHOST_DLAA"); e && e[0] == '0') h.dlss_mode = 0;
+        h.upscaler_backend = 0;
+        h.output_width = h.res_width;
+        h.output_height = h.res_height;
+    }
     // Distance and height: 5 is the game's own, 10% a step either way. Field
     // of view: 0 is the game's own, 5% wider a step (BBHOST_FOV overrides).
     const auto around = [](int id) { return 0.5f + 0.1f * static_cast<float>(index_of(id)); };
@@ -1374,6 +1387,11 @@ void options_panel_frame(float display_w, float display_h) {
 HostSettings host_settings() {
     std::lock_guard<std::mutex> lk(g_settings_mu);
     return g_settings;
+}
+
+const HostSettings& host_startup_settings() {
+    static const HostSettings settings = host_settings();
+    return settings;
 }
 
 namespace {

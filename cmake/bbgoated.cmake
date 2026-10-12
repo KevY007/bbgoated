@@ -46,13 +46,6 @@ if(TARGET config_test AND BBGOATED)
   add_test(NAME redzone_audit_test COMMAND redzone_audit_test)
 endif()
 
-# DLAA (the YoucefNabil/bbhost fork, src/host/dlaa.*): NVIDIA DLAA through the runtime-loaded
-# ngx_bridge.dll, wherever the Vulkan renderer is built.
-if(Vulkan_FOUND)
-  target_sources(bbhost PRIVATE src/host/dlaa.cpp)
-  set_source_files_properties(src/host/dlaa.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
-endif()
-
 # DLAA and the game's own anti-aliasing (host/dlaa_aa.*), tested on its own.
 if(Vulkan_FOUND)
   target_sources(bbhost PRIVATE src/host/dlaa_aa.cpp)
@@ -62,3 +55,6 @@ if(TARGET config_test)
   target_include_directories(dlaa_aa_test PRIVATE src)
   add_test(NAME dlaa_aa_test COMMAND dlaa_aa_test)
 endif()
+
+# Phase 2: the upscalers (PR #73's parts and bbgoated's own), in a file of their own.
+include(${CMAKE_CURRENT_LIST_DIR}/bbgoated-upscale.cmake)

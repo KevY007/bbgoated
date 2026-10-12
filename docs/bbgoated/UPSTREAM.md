@@ -42,9 +42,10 @@ Pieces of unmerged work re-applied as bbgoated commits (`bbg/upscale:`), with th
 | Source | bbgoated commit | What | Left out |
 |---|---|---|---|
 | upstream-pr/73 at 539d45f | bbg/upscale: ngx_bridge ABI v2 from PR #73 (this commit) | tools/ngx_bridge (ABI v2) | none |
-| upstream-pr/73 at 539d45f (on 566184a) | (filled by Tasks 3-7) | | frame generation (85d81a9's rows included), Reflex, presenter/frame-loop timing (pr73-port.md table B) |
+| upstream-pr/73 at 539d45f | bbg/upscale: DLSS evaluation path from PR #73 - DLAA at the HDR anchor, camera motion vectors, jitter | (a2): dlaa.cpp/.h, display_settings.h, fsr_upscaler.h, object_motion.*, motion_history.h, shaders/dlaa_mv.*, tools/dlaa_cbscan.py, docs/dlaa.md, display_settings_test, dlaa_motion_test; render.cpp, gpu.cpp, window.cpp, config.h/.cpp, settings.h, options.cpp, main.cpp, config_test and bbhost.example.toml hunks (pr73-port.md tables A-C); ngx_transfer_sync_test registered | Reflex (`host/reflex.h`, its frame ID); the FG backend switch and template lines; render.cpp h25's object-motion params (d); gpu.cpp h7's derivatives block. Frame generation's NGX extension queries run only when it is requested |
+| upstream-pr/73 at 539d45f (on 566184a) | (filled by Tasks 5-7) | | frame generation (85d81a9's rows included), Reflex, presenter/frame-loop timing (pr73-port.md table B) |
 
-The DLAA fork's picks above (ae0b56f, 8e42461, in the tracked refs) give way to PR #73's versions of the same files when (a1) and (a2) land: pr73-port.md, section E.
+The DLAA fork's picks above (ae0b56f, 8e42461, in the tracked refs) gave way to PR #73's versions of the same files in (a1) and (a2): pr73-port.md, section E.
 
 ## Upstream behaviour bbgoated changes by default
 

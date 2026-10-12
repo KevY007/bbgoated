@@ -12,12 +12,15 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0, r32f) uniform readonly image2D depth;
 layout(set = 0, binding = 1, rg16f) uniform writeonly image2D motion;
+layout(set = 0, binding = 2, rgba32f) uniform readonly image2D object_motion;
 
 layout(push_constant) uniform Params {
     mat4 reproject;  // current NDC (x, y up, depth 0..1, 1) -> previous clip
     vec2 jitter;     // pixels, x right, y down
     uvec2 size;
     uint zero;       // 1: write zero motion (Ctrl+F4)
+    uint objects;    // 1: accept valid, visible animated-mesh vectors
+    float projection_z;
 };
 
 void main() {
@@ -33,6 +36,14 @@ void main() {
         if (prev.w > 1e-6) {
             const vec2 q = prev.xy / prev.w;
             mv = vec2((q.x + 1.0) * 0.5 * dims.x, (1.0 - q.y) * 0.5 * dims.y) - p;
+        }
+        if (objects != 0u) {
+            const vec4 object = imageLoad(object_motion, xy);
+            // An ordinary draw can later occlude an instrumented mesh without
+            // writing the motion target. Reject that mesh's old depth/vector.
+            const float tolerance = max(2e-7, (projection_z - z) * 0.01);
+            if (object.b > 0.99 && abs(object.a - z) < tolerance &&
+                !any(isnan(object.rg)) && !any(isinf(object.rg))) mv = object.rg;
         }
     }
     imageStore(motion, xy, vec4(mv, 0.0, 0.0));

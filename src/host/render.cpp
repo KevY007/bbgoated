@@ -8,6 +8,7 @@
 #include "engine/gx_resources.h"
 #include "engine/gx_state.h"
 #include "host/dlaa.h"
+#include "host/object_motion.h"
 #include "host/gpu_internal.h"
 #include "host/shader_patch.h"
 #include "host/tess_lds.h"
@@ -12300,7 +12301,24 @@ bool host_gpu_draw(const GpuDraw& d) {
     return tess_draw_one(d, t);
 }
 
+struct SrHudState {
+    bool active = false;
+    std::uint64_t target_rt = 0;
+    std::uint64_t depth_rt = 0;
+    std::uint32_t in_w = 0;
+    std::uint32_t in_h = 0;
+    std::uint32_t out_w = 0;
+    std::uint32_t out_h = 0;
+    float scale_x = 1.0f;
+    float scale_y = 1.0f;
+};
+static SrHudState s_sr_hud;
+
 static bool draw_impl(const GpuDraw& d) {
+    struct ObjectMotionScope {
+        ObjectMotionScope() { t_object_motion_draw = false; t_object_motion_location = 0; }
+        ~ObjectMotionScope() { t_object_motion_draw = false; t_object_motion_location = 0; }
+    } object_motion_scope;
     g_draw_dummies = 0;  // the draw record takes the count of this draw's
     t_draw_pipeline = nullptr;
     g.draw_calls.fetch_add(1, std::memory_order_relaxed);
@@ -12974,6 +12992,7 @@ static bool draw_impl(const GpuDraw& d) {
     // HDR scene it samples goes through DLSS (dlaa.cpp).
     if (pl.dlaa_anchor < 0) pl.dlaa_anchor = dlaa_is_anchor(pl.name) ? 1 : 0;
     if (pl.dlaa_anchor == 1) {
+        s_sr_hud = {};
         std::uint64_t sampled[2] = {};
         const auto& images = pl.ps.meta().images;
         const int n = static_cast<int>(std::min<std::size_t>(images.size(), 2));
@@ -12982,6 +13001,33 @@ static bool draw_impl(const GpuDraw& d) {
             if (resolve_binding(images[k].path, s.ps_user, gx_stage[1], 8, tw)) sampled[k] = tsharp_base(tw);
         }
         dlaa_anchor_locked(sampled, n);
+    }
+    // The depth-only HUD clear (34e8a281) has no colour attachment. Capture
+    // the composed scene at the first actual colour HUD draw instead, before
+    // any health bars or text are blended into it. The temporal backend dedups
+    // this by scene frame, independently of CPU flip counters.
+    if (pl.name.rfind("81d336ce+", 0) == 0 && s.color[0] && s.color_mask[0]) {
+        const auto w = static_cast<std::uint32_t>(std::abs(s.vport[0] * 2.0f));
+        const auto h = static_cast<std::uint32_t>(std::abs(s.vport[2] * 2.0f));
+        std::uint32_t capture_w = w;
+        std::uint32_t capture_h = h;
+        if (dlss_sr_is_active()) {
+            std::uint32_t out_w = w, out_h = h;
+            if (dlss_sr_upscale_hud_locked(s.color[0], w, h, &out_w, &out_h)) {
+                s_sr_hud.active = true;
+                s_sr_hud.target_rt = s.color[0]->base;
+                s_sr_hud.depth_rt = s.depth ? s.depth->base : 0;
+                s_sr_hud.in_w = w;
+                s_sr_hud.in_h = h;
+                s_sr_hud.out_w = out_w;
+                s_sr_hud.out_h = out_h;
+                s_sr_hud.scale_x = static_cast<float>(out_w) / static_cast<float>(w);
+                s_sr_hud.scale_y = static_cast<float>(out_h) / static_cast<float>(h);
+                capture_w = out_w;
+                capture_h = out_h;
+            }
+        }
+        dlaa_capture_hudless_locked(s.color[0], capture_w, capture_h);
     }
     // A pipeline that reads memory through the page table could read a
     // copy-back's destination before its copy is in place (copy versions).
@@ -14695,12 +14741,42 @@ static bool draw_impl(const GpuDraw& d) {
     // both ends inside [0, 1].
     vp.minDepth = std::clamp(vp.minDepth, 0.0f, 1.0f);
     vp.maxDepth = std::clamp(vp.maxDepth, 0.0f, 1.0f);
+    VkRect2D sc = s.scissor;
+    if (s_sr_hud.active) {
+        const bool is_finalcopy = (pl.name.rfind("89cda9e4+", 0) == 0);
+        const bool is_ui_target = (s.color[0] && s.color[0]->base == s_sr_hud.target_rt);
+        const bool is_ui_depth = (s.depth && s_sr_hud.depth_rt && s.depth->base == s_sr_hud.depth_rt);
+        if (is_ui_target || is_ui_depth) {
+            if (is_ui_target && s.depth && !s_sr_hud.depth_rt) {
+                s_sr_hud.depth_rt = s.depth->base;
+            }
+            vp.x *= s_sr_hud.scale_x;
+            vp.y *= s_sr_hud.scale_y;
+            vp.width *= s_sr_hud.scale_x;
+            vp.height *= s_sr_hud.scale_y;
+            sc.offset.x = static_cast<std::int32_t>(std::round(sc.offset.x * s_sr_hud.scale_x));
+            sc.offset.y = static_cast<std::int32_t>(std::round(sc.offset.y * s_sr_hud.scale_y));
+            sc.extent.width = static_cast<std::uint32_t>(std::round(sc.extent.width * s_sr_hud.scale_x));
+            sc.extent.height = static_cast<std::uint32_t>(std::round(sc.extent.height * s_sr_hud.scale_y));
+        } else if (is_finalcopy) {
+            // Preserve the guest's negative-height viewport (GCN Y-down),
+            // including its origin, while expanding the final copy.
+            vp.x *= s_sr_hud.scale_x;
+            vp.y *= s_sr_hud.scale_y;
+            vp.width *= s_sr_hud.scale_x;
+            vp.height *= s_sr_hud.scale_y;
+            sc.offset.x = 0;
+            sc.offset.y = 0;
+            sc.extent.width = s_sr_hud.out_w;
+            sc.extent.height = s_sr_hud.out_h;
+            s_sr_hud.active = false;
+        }
+    }
     if (!g_recorded.viewport_set || std::memcmp(&g_recorded.viewport, &vp, sizeof(vp)) != 0) {
         cmds.viewport(vp);
         g_recorded.viewport = vp;
         g_recorded.viewport_set = true;
     }
-    VkRect2D sc = s.scissor;
     sc.extent.width = std::min<std::uint32_t>(sc.extent.width, g_pass.extent.width > static_cast<std::uint32_t>(sc.offset.x) ? g_pass.extent.width - sc.offset.x : 0);
     sc.extent.height = std::min<std::uint32_t>(sc.extent.height, g_pass.extent.height > static_cast<std::uint32_t>(sc.offset.y) ? g_pass.extent.height - sc.offset.y : 0);
     if (!sc.extent.width || !sc.extent.height) {
