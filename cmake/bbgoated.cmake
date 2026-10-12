@@ -57,6 +57,10 @@ if(TARGET config_test)
     add_test(NAME ${n} COMMAND ${n})
   endforeach()
 endif()
+# tools/bbg_sites.py, which names the census's call sites (BBHOST_BBG_PASS_BREAKS).
+if(TARGET config_test AND Python3_Interpreter_FOUND)
+  add_test(NAME bbg_sites_test COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/bbg_sites_test.py)
+endif()
 
 # The red-zone audit's site table (host/redzone_audit.*), tested on its own.
 if(TARGET config_test AND BBGOATED)

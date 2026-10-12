@@ -14,6 +14,7 @@
 #include "host/translation_cache.h"
 
 #include "host/draw_capture.h"
+#include "host/perf/census.h"
 #include "gcn/container.h"
 #include "gcn/lift.h"
 #include "gcn/names.h"
@@ -7147,6 +7148,7 @@ DrawCmds* draw_packet_early_locked() {
 
 void render_end_pass_locked() {
     if (g_pass.active) {
+        bbg::census_pass_end_locked(__builtin_return_address(0));  // bbgoated (host/perf/census.cpp, BBHOST_BBG_PASS_BREAKS)
         g_pass.active = false;
         // Into the open draw's packet when it can take it (recorder.cpp).
         if (DrawCmds* c = DrawCmds::open(); !c || !c->end_rendering()) rec().end_rendering(true);

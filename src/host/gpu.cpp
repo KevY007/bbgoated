@@ -6,6 +6,7 @@
 #include "host/foreign_hooks.h"
 #include "host/draw_capture.h"
 #include "host/gpu_internal.h"
+#include "host/perf/census.h"
 #include "host/shader_patch.h"
 #include "host/shaders/gpu_stall.spv.h"
 #include "host/translation_cache.h"
@@ -6332,6 +6333,7 @@ std::atomic<std::uint64_t> g_batch_orders{0};
 void transfer_begin_locked() {
     begin_recording_locked();
     if (g.in_transfer) return;
+    bbg::census_batch_open_locked(__builtin_return_address(0));  // bbgoated (host/perf/census.cpp, BBHOST_BBG_PASS_BREAKS)
     render_end_pass_locked();
     copy_versions_flush_locked();  // copy-backs still in their copies (BBHOST_COPY_VERSIONS=2) land before this batch
     // Into the open packet when it can take it (a copy token's own).
