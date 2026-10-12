@@ -30,6 +30,10 @@
 #include <vulkan/vulkan.h>
 
 namespace gpu {
+// bbgoated: whether DLAA runs now (enabled, NGX ready, not switched off with Ctrl+F1).
+bool dlaa_running();
+// bbgoated, window.cpp's pump: the game's anti-aliasing held off while DLAA runs (host/dlaa_aa.h).
+void dlaa_aa_tick();
 
 struct DrawRec;
 
