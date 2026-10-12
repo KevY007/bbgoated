@@ -7,6 +7,7 @@
 #include "host/draw_capture.h"
 #include "host/gpu_internal.h"
 #include "host/perf/census.h"
+#include "host/perf/vk/cb_ring.h"
 #include "host/perf/vk/device_mem.h"
 #include "host/shader_patch.h"
 #include "host/shaders/gpu_stall.spv.h"
@@ -4278,6 +4279,7 @@ void retire_slot_locked(int k) {
     busy_retired_locked(sl, true);
     glitch_slot_done_locked(sl);
     textures_retired(k);
+    cb_ring_slot_retired_locked(k);  // bbgoated (host/perf/vk/cb_ring.cpp, BBHOST_BBG_CB_SNAPSHOT)
 }
 
 void defer_destroy(const DevBuffer& b) { g.slots[g.slot].garbage.push_back(b); }
@@ -5789,6 +5791,7 @@ bool host_gpu_dispatch(const GpuDispatch& d) {
         submit_locked();
     }
     begin_recording_locked();
+    cb_ring_stage_writes_locked(pl.meta, d.user_data);  // bbgoated (host/perf/vk/cb_ring.cpp): its stores, before anything is copied
     // The counters' starts go first, on the GPU's timeline: a set count (an
     // initial count of 0 for the buffer the dispatch appends to) written into
     // the word, a count from another word copied in.
@@ -6739,6 +6742,7 @@ bool host_gpu_mem_fill(std::uint64_t va, std::uint32_t value, std::size_t bytes)
     transfer_begin_locked();
     transfer_order_locked(VK_NULL_HANDLE, 0, loc.buffer, loc.offset, bytes, true);
     rec().fill_buffer(loc.buffer, loc.offset, bytes, value);
+    cb_ring_gpu_wrote_locked(va, bytes);  // bbgoated (host/perf/vk/cb_ring.cpp, BBHOST_BBG_CB_SNAPSHOT)
     transfer_end_locked();
     return true;
 }
@@ -6754,6 +6758,7 @@ bool host_gpu_mem_copy(std::uint64_t dst, std::uint64_t src, std::size_t bytes) 
     transfer_order_locked(sr.buffer, sr.offset, d.buffer, d.offset, bytes, true);
     VkBufferCopy region{sr.offset, d.offset, bytes};
     rec().copy_buffer(sr.buffer, d.buffer, 1, &region);
+    cb_ring_gpu_wrote_locked(dst, bytes);  // bbgoated (host/perf/vk/cb_ring.cpp, BBHOST_BBG_CB_SNAPSHOT)
     transfer_end_locked();
     return true;
 }
@@ -6866,6 +6871,7 @@ bool host_gpu_copy_guest(std::uint64_t dst, std::uint64_t src, std::size_t bytes
         transfer_end_locked();
         done += n;
     }
+    cb_ring_gpu_wrote_locked(dst, bytes);  // bbgoated (host/perf/vk/cb_ring.cpp, BBHOST_BBG_CB_SNAPSHOT)
     return true;
 }
 
@@ -7037,6 +7043,7 @@ void copy_versions_flush_locked() {
     for (auto it = pending.rbegin(); it != pending.rend(); ++it) {
         const CopyVersion& v = *it;
         mark_surfaces_dirty_locked(v.dst, v.bytes);  // the buffer shadow sees the GPU write
+        cb_ring_gpu_wrote_locked(v.dst, v.bytes);    // bbgoated (host/perf/vk/cb_ring.cpp): put in place on the GPU's timeline
         const std::uint64_t end = v.dst + v.bytes;
         auto copy_piece = [&](std::uint64_t lo, std::uint64_t hi) {
             const VkBufferCopy region{v.offset + (lo - v.dst), v.canon.offset + (lo - v.dst), hi - lo};

@@ -45,6 +45,7 @@
 
 #include "core/write_watch.h"
 #include "host/gpu_internal.h"
+#include "host/perf/vk/cb_ring.h"
 #include "host/perf/vk/shadow_policy.h"
 #include "host/stage_share.h"
 #include "log.h"
@@ -856,6 +857,7 @@ void shadow_probe_locked(std::uint64_t va, std::uint64_t bytes, char* out, std::
 }
 
 void shadow_written_locked(std::uint64_t va, std::uint64_t bytes, bool by_gpu) {
+    if (by_gpu) cb_ring_gpu_wrote_locked(va, bytes);  // bbgoated (host/perf/vk/cb_ring.cpp, BBHOST_BBG_CB_SNAPSHOT): no snapshot runs ahead of this write
     if (!buffer_shadow_on() || !bytes) return;
     std::uint32_t chunk = 0;
     std::uint64_t off = 0, map_lo = 0, map_hi = 0;

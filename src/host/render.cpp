@@ -10,6 +10,7 @@
 #include "host/dlaa.h"
 #include "host/gpu_internal.h"
 #include "host/perf/vk/async_skip.h"
+#include "host/perf/vk/cb_ring.h"
 #include "host/shader_patch.h"
 #include "host/tess_lds.h"
 #include "host/translation_cache.h"
@@ -9003,6 +9004,10 @@ bool draw_window_locked(std::uint64_t base, std::uint64_t bytes, Located& out) {
     return false;
 }
 
+// bbgoated (host/perf/vk/cb_ring.cpp, BBHOST_BBG_CB_SNAPSHOT_CS): resolve_stage_buffers is resolving a
+// dispatch's buffers (BBHOST_BBG_CS_CB), which are copied only with that switch.
+thread_local bool t_dispatch_resolve = false;
+
 // TranslateOptions::cb_ssbo: bind each constant buffer the shader reads
 // through a storage buffer over the V#'s imported memory. The range starts at
 // the V# base aligned down to minStorageBufferOffsetAlignment and the shader
@@ -9015,6 +9020,7 @@ void resolve_stage_buffers(const gcn::TranslateResult& meta, const std::uint32_t
     enum { kBound, kNoBase, kUnaligned, kUnmapped, kTooLong, kOutcomes };
     static std::uint64_t outcomes[kOutcomes] = {};
     static std::uint64_t resolves = 0;
+    cb_ring_stage_writes_locked(meta, user, gx, &resolve_binding);  // bbgoated (host/perf/vk/cb_ring.cpp, BBHOST_BBG_CB_SNAPSHOT): its stores first
     const GxStagePlan* plan = gx && g_binding_plans ? &stage_plan(meta, *gx) : nullptr;
     for (std::size_t i = 0; i < meta.buffers.size(); ++i) {
         const gcn::BufferBinding& b = meta.buffers[i];
@@ -9144,10 +9150,19 @@ void resolve_stage_buffers(const gcn::TranslateResult& meta, const std::uint32_t
                 realign = realign || glitch_snapshot_draw();  // BBHOST_GLITCH_SNAPSHOT: the bytes as recorded
             }
             if (b.written) realign = false;  // stores go to the guest memory, never to a copy
+            // bbgoated (host/perf/vk/cb_ring.cpp, BBHOST_BBG_CB_SNAPSHOT): the bytes as recorded, in the
+            // slot's own ring at bias 0 - which also realigns, as the copy below would.
+            if (!b.written && !in_window && cb_snapshot_on() &&
+                cb_snapshot_locked(base, bytes, version == kCopyVersionInside, t_dispatch_resolve, info)) {
+                params.cb_valid |= 1u << i;
+                params.cb_bias_dw[i] = 0;
+                outcome = kBound;
+                if (version == kCopyVersionNone && copy_version_lookup_locked(base, bytes, nullptr) == kCopyVersionNone) note_copy_binding_locked(info, base);
+            }
             static DevBuffer scratch;
             static VkDeviceSize scratch_next = 0;
             constexpr VkDeviceSize kScratch = 64ull << 20;
-            if (realign && bytes && bytes <= (1u << 20) && hle_kernel_va_mapped(base, bytes)) {
+            if (outcome != kBound && realign && bytes && bytes <= (1u << 20) && hle_kernel_va_mapped(base, bytes)) {
                 if (!scratch.buffer) create_dev_buffer(scratch, kScratch, true);
                 if (scratch.map) {
                     if (scratch_next + bytes + 256 > kScratch) scratch_next = 0;
@@ -11779,6 +11794,7 @@ bool tess_ls_pass_locked(const GpuDraw& d, TessDraw& t) {
     prefetch_stage_images(pl.meta, user, images);
     if (g.queued + 1 >= kMaxQueued * kStageSlots) submit_locked();
     begin_recording_locked();
+    cb_ring_stage_writes_locked(pl.meta, user);  // bbgoated (host/perf/vk/cb_ring.cpp, BBHOST_BBG_CB_SNAPSHOT): its stores, before anything is copied
     transfer_flush_locked();
     render_end_pass_locked();
     gcn::StageParams params{};
