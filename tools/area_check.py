@@ -40,7 +40,8 @@ faces, and the same turn is made in every run; the frames are taken where the
 camera stopped. A swept window is not a still one: `compare` refuses runs whose
 sweeps differ. The host and the probe must both be from the commit that added
 --sweep or later - older ones ignore the request - so a swept window without the
-host's `test: stick` line is reported as a problem.
+host's `test: stick` line is not ok: its place has the status `sweep not carried
+out`, a problem (exit 1) that leaves it out of an A/B's numbers.
 
 The capture pass visits the same places and, after the settle, lets
 BBHOST_CAPTURE_DRAW=*ps take the first draw of up to --captures pixel shaders
@@ -1913,12 +1914,22 @@ def finish_pass(pass_dir, areas, kind, launched, opts):
     return rep
 
 
-def merge(perf, capture, lifts, areas):
+# The status of a swept run's place whose window the host held no stick in: the window was still, under a
+# record that says it was swept - not what was asked for, so not ok (merge), as a place that died is not.
+NO_SWEEP = "sweep not carried out"
+
+
+def merge(perf, capture, lifts, areas, sweep=None):
     """The places' report from the two passes: the perf pass's numbers, the
-    capture pass's captures and lift results."""
+    capture pass's captures and lift results. sweep: the run's camera sweep
+    (None: still). A place of a swept run that is ok but has no stick the host
+    held in its window (its sticks_held is empty) is NO_SWEEP instead, so an A/B
+    leaves its numbers out and says it was not measured in every run."""
     out = {}
     for a in areas:
         ent = dict((perf or {}).get("areas", {}).get(a.id) or {"id": a.id, "name": a.name, "block": a.block, "status": "not run"})
+        if sweep is not None and ent.get("status") == "ok" and ent.get("sticks_held") == []:
+            ent["status"] = NO_SWEEP
         for name, f in (ent.get("frames") or {}).items():
             if f.get("ok") and Path(f["path"]).is_file():
                 try:
@@ -1951,16 +1962,17 @@ def problems_of(report):
         if size and p.get("rendering") and list(p["rendering"]) != list(size):
             out.append("%s pass: rendered at %dx%d, not the %dx%d asked for" % (kind, p["rendering"][0], p["rendering"][1], size[0], size[1]))
     for aid, a in report.get("areas", {}).items():
-        if a.get("status") != "ok":
+        # A swept run's request must have come to a stick held in the window. A host or a probe from
+        # before --sweep ignores it without a problem of its own, and the window is a still one all the
+        # same, recorded as swept (a place with no window has no sticks_held to be empty).
+        no_stick = report.get("run", {}).get("sweep") is not None and a.get("sticks_held") == []
+        if a.get("status") != "ok" and not (no_stick and a.get("status") == NO_SWEEP):  # that one is told below
             out.append("%s: %s" % (aid, a.get("status")))
         cp = a.get("capture_pass")
         if cp and cp.get("status") != "ok":
             out.append("%s: %s in the capture pass" % (aid, cp.get("status")))
-        # A swept run's request must have come to a stick held in the window. A host or a probe from
-        # before --sweep ignores it without a problem of its own, and the window is a still one all the
-        # same, recorded as swept (a place with no window has no sticks_held to be empty).
-        if report.get("run", {}).get("sweep") is not None and a.get("sticks_held") == []:
-            out.append("%s: sweep not carried out (host or probe older than --sweep?)" % aid)
+        if no_stick:
+            out.append("%s: %s (host or probe older than --sweep?)" % (aid, NO_SWEEP))
         tot = (a.get("lift") or {}).get("totals", {})
         if tot.get("different") or tot.get("invalid"):
             out.append("%s: %d lifted shaders render differently, %d invalid" % (aid, tot.get("different", 0), tot.get("invalid", 0)))
@@ -2110,7 +2122,7 @@ def do_run(args, bbhost=None, out=None, captures=True, say=print):
     report["run"]["version"] = (passes.get("perf") or {}).get("version")
     report["run"]["load_after"] = os.getloadavg() if hasattr(os, "getloadavg") else None
     report["run"]["seed_unchanged"] = world_baseline.file_inventory(seed) == opts["seed_files"]
-    report["areas"] = merge(passes.get("perf"), passes.get("capture"), lifts, areas)
+    report["areas"] = merge(passes.get("perf"), passes.get("capture"), lifts, areas, sweep=opts["sweep"])
     report["problems"] = problems_of(report)
     if not report["run"]["seed_unchanged"]:
         report["problems"].append("the seed changed during the run")
@@ -2144,7 +2156,7 @@ def do_report(args):
         k: {x: v.get(x) for x in ("stop_reason", "returncode", "elapsed_s", "world", "tour_done", "fatal", "version", "rendering",
                                   "build_files", "title")}
         for k, v in passes.items()}}
-    report["areas"] = merge(passes.get("perf"), passes.get("capture"), lifts, areas)
+    report["areas"] = merge(passes.get("perf"), passes.get("capture"), lifts, areas, sweep=(report["run"] or {}).get("sweep"))
     report["problems"] = problems_of(report)
     (run / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     text = summary_text(report)
@@ -2251,8 +2263,8 @@ def add_run_options(p):
                    help="turn the camera through each window: the right stick's X axis held at VALUE (0-255, 128 is centre; %d "
                         "without one) for the whole measure time, so the camera turns at a steady rate. Off by default; runs made "
                         "with different sweeps cannot be compared. Needs a bbhost and a probe from the commit that added --sweep "
-                        "or later: older ones ignore it, and a window the host did not hold a stick in is reported as a problem "
-                        "(exit 1)" % SWEEP_VALUE)
+                        "or later: older ones ignore it, and a window the host did not hold a stick in is a place that was not "
+                        "measured (status 'sweep not carried out': a problem, exit 1, and left out of an A/B's numbers)" % SWEEP_VALUE)
     p.add_argument("--env", action="append", default=[], metavar="BBHOST_NAME=VALUE", help="another setting for the game (repeatable)")
     p.add_argument("--keep-data", action="store_true", help="keep each pass's copy of the seed")
     p.add_argument("--keep-captures", action="store_true", help="keep captures whose lift was shown identical (~50 MB each)")

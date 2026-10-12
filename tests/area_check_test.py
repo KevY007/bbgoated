@@ -622,6 +622,41 @@ class LogTest(unittest.TestCase):
         self.assertEqual(perf["moonside-lake"]["sticks_held"], [])
         self.assertNotIn("sticks_held", perf["hunters-dream"])
 
+    def test_a_swept_place_without_its_stick_is_not_measured(self):
+        """In a swept run a place whose window has no stick the host held did
+        not measure what was asked for - a still window under a swept record -
+        and is not ok: its status says `sweep not carried out`, so an A/B
+        leaves its numbers out like a death's. A status a place already had
+        stays (the problem list still names the sweep too), a run that asked
+        for no sweep is untouched, and the problem is told once."""
+        cy, rom, hd, cw = (ac.AREA_BY_ID[k] for k in ("central-yharnam", "moonside-lake", "hunters-dream", "cathedral-ward"))
+        win = [[16.7] * 60 for _ in range(4)]
+        held = "[bbhost] test: stick rx 182 for 20000 ms at flip 3123"
+        died = mapval("mapval death %.3f %s %.3f %.3f %.3f", 125.0, "18010000", 1.0, 2.0, 3.0)
+        lines = ["[bbhost] plugin: mapval tour-start 100.000"]
+        lines += area_lines(cy, 100.0, "18010000", win, window_events=[died])  # died in its window, no stick
+        lines += area_lines(rom, 160.0, "20000000", win, view=rom.view(), window_events=[held])  # the stick held
+        lines += area_lines(hd, 230.0, "15000000", win)  # measured, but no stick
+        lines.append("[bbhost] plugin: mapval tour-done 290.000")
+        areas = [cy, rom, hd, cw]  # the last never reached
+        perf = ac.pass_report(lines, areas, "perf")
+
+        def statuses(sweep):
+            return {k: v["status"] for k, v in ac.merge(perf, None, None, areas, sweep=sweep).items()}
+        self.assertEqual(statuses(None), {"central-yharnam": "died in the window", "moonside-lake": "ok", "hunters-dream": "ok",
+                                          "cathedral-ward": "not reached"})
+        self.assertEqual(statuses(182), {"central-yharnam": "died in the window", "moonside-lake": "ok",
+                                         "hunters-dream": "sweep not carried out", "cathedral-ward": "not reached"})
+        merged = ac.merge(perf, None, None, areas, sweep=182)
+        self.assertIsNotNone(merged["hunters-dream"]["window"])  # its numbers are in the report; the A/B leaves them out
+        report = {"run": {"sweep": 182}, "passes": {"perf": dict(perf)}, "areas": merged}
+        sweep = "%s: sweep not carried out (host or probe older than --sweep?)"
+        self.assertEqual([p for p in ac.problems_of(report) if not p.startswith("cathedral-ward")],
+                         ["central-yharnam: died in the window", sweep % "central-yharnam", sweep % "hunters-dream"])
+        # Asked for no sweep: no problem about one.
+        report["run"], report["areas"] = {}, ac.merge(perf, None, None, areas)
+        self.assertEqual([p for p in ac.problems_of(report) if not p.startswith("cathedral-ward")], ["central-yharnam: died in the window"])
+
     def test_capture_pass(self):
         cy = ac.AREA_BY_ID["central-yharnam"]
         lines = area_lines(cy, 10.0, "18010000", [], kind="capture", captures=["8747a367+a22c7f71", "1234abcd+6c5edb96"])
@@ -1176,23 +1211,65 @@ class EndToEndTest(unittest.TestCase):
         before it (it logs the step as a line it cannot read). A swept run of
         either of the last two exits 1 and says, place by place, that the sweep
         was not carried out - the run's own record says it was swept, so
-        nothing else would; asked for no sweep, the same game is fine."""
+        nothing else would - and those places are not ok, as a place that did
+        not measure what was asked is not; asked for no sweep, the same game
+        is fine."""
         self.assertEqual(self.run_once("held", "--sweep", "--captures", "0"), 0)
         rep = json.loads((self.d / "held" / "report.json").read_text())
         self.assertEqual(rep["problems"], [])
         for aid in ("central-yharnam", "moonside-lake"):  # --measure 6: the stick for 6000 ms
             self.assertEqual([(h["axis"], h["value"], h["ms"]) for h in rep["areas"][aid]["sticks_held"]], [("rx", ac.SWEEP_VALUE, 6000)])
-        want =["%s: sweep not carried out (host or probe older than --sweep?)" % p for p in ("central-yharnam", "moonside-lake")]
+            self.assertEqual(rep["areas"][aid]["status"], "ok")
+        want = ["%s: sweep not carried out (host or probe older than --sweep?)" % p for p in ("central-yharnam", "moonside-lake")]
         for mode in ("old-host", "old-probe"):
             self.assertEqual(self.run_once(mode, "--sweep", "--captures", "0", "--env", "BBHOST_STANDIN_STICK=" + mode), 1, mode)
             rep = json.loads((self.d / mode / "report.json").read_text())
             self.assertEqual(rep["run"]["sweep"], ac.SWEEP_VALUE)
-            self.assertEqual(rep["problems"], want, mode)
-            self.assertEqual(rep["areas"]["central-yharnam"]["sticks_held"], [])
-            self.assertEqual(rep["areas"]["central-yharnam"]["status"], "ok")  # the place itself was measured
-            self.assertIn("problem: " + want[0], (self.d / mode / "summary.txt").read_text())
+            self.assertEqual(rep["problems"], want, mode)  # once for each place
+            for aid in ("central-yharnam", "moonside-lake"):
+                self.assertEqual(rep["areas"][aid]["sticks_held"], [])
+                self.assertEqual(rep["areas"][aid]["status"], "sweep not carried out")
+                self.assertIsNotNone(rep["areas"][aid]["window"])  # measured all the same: the report keeps the numbers
+            text = (self.d / mode / "summary.txt").read_text()
+            self.assertIn("Central Yharnam (m24_01_00_00): sweep not carried out", text)
+            self.assertIn("problem: " + want[0], text)
+            # The report again from the logs says the same.
+            self.assertEqual(self.main(["report", str(self.d / mode)]), 1)
+            again = json.loads((self.d / mode / "report.json").read_text())
+            self.assertEqual((again["problems"], again["areas"]["moonside-lake"]["status"]), (want, "sweep not carried out"))
         # Not asked for: whatever the game does with the step, there is none.
         self.assertEqual(self.run_once("still", "--captures", "0", "--env", "BBHOST_STANDIN_STICK=old-host"), 0)
+        self.assertEqual(json.loads((self.d / "still" / "report.json").read_text())["areas"]["central-yharnam"]["status"], "ok")
+
+    def test_an_a_b_leaves_out_a_sweep_that_was_not_carried_out(self):
+        """A swept run whose game did not carry the sweep out (an older host or
+        probe) records the same sweep as one that did, so compare's guard on
+        the recorded sweeps lets the two through - and the places of the first
+        are not ok, so their numbers stay out of the comparison, ab.txt says
+        they were not measured in every run and the exit is 1. Two runs that
+        did carry it out compare as ever."""
+        self.assertEqual(self.run_once("held", "--sweep", "--captures", "0"), 0)
+        self.assertEqual(self.run_once("held2", "--sweep", "--captures", "0"), 0)
+        self.assertEqual(self.compare_runs("held", "held2", "ab-held"), 0, self.stderr)
+        both = json.loads((self.d / "ab-held" / "ab.json").read_text())
+        self.assertEqual(both["flagged"], [])
+        for aid in ("central-yharnam", "moonside-lake"):
+            self.assertIn("fps", both["areas"][aid]["perf"])
+        for mode in ("old-host", "old-probe"):
+            self.assertEqual(self.run_once(mode, "--sweep", "--captures", "0", "--env", "BBHOST_STANDIN_STICK=" + mode), 1, mode)
+            for a, b in ((mode, "held"), ("held", mode)):  # whichever side it is on
+                out = "ab-%s-%s" % (a, b)
+                self.assertEqual(self.compare_runs(a, b, out), 1, (a, b, self.stderr))
+                ab = json.loads((self.d / out / "ab.json").read_text())
+                sa, sb = ("sweep not carried out", "ok") if a == mode else ("ok", "sweep not carried out")
+                for aid in ("central-yharnam", "moonside-lake"):
+                    self.assertEqual(ab["areas"][aid]["status"], {"a": [sa], "b": [sb]})
+                    self.assertEqual(ab["areas"][aid]["perf"], {})  # nothing of either side's numbers is used
+                    self.assertEqual(ab["areas"][aid]["arrival"], {})
+                    self.assertIn("%s: not measured in every run (A ['%s'], B ['%s'])" % (aid, sa, sb), ab["flagged"])
+                text = (self.d / out / "ab.txt").read_text()
+                self.assertIn("central-yharnam: A %s, B %s" % (sa, sb), text)
+                self.assertIn("not measured in every run", text)
 
 
 if __name__ == "__main__":

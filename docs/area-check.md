@@ -80,7 +80,10 @@ Both the build (`bbhost`) and the probe (`mapval`) must come from the commit
 that added `--sweep` or later: an older host logs `test: request ... not
 understood` and an older probe skips the step, and the window stays still. A
 swept run checks that the host said `test: stick ... for ... ms` inside each
-window, and reports `sweep not carried out` (exit 1) for each place without it.
+window; a place without it did not measure what was asked, so its status is
+`sweep not carried out`: a problem (exit 1) and, as for any place that failed,
+its numbers are left out of an A/B, whose `ab.txt` flags it as not measured in
+every run.
 
 The turn was measured on the game (the camera's own angles four times a
 second, at Central Yharnam; the same at the 30, 60 and 120 fps settings). The
@@ -114,8 +117,9 @@ game would not keep the player in), meet a loading screen in the window or
 move more than 3 m across (5 m up or down). A place that fails one of these
 says why in its status - `not there: m21_00_00_00 at the measure mark`,
 `died in the window`, `moved 40 m in the window` - and is left out of an
-A/B's numbers. The settle a place had is counted from the loading screen's
-end.
+A/B's numbers. So is a place of a swept run in whose window the host held no
+stick: `sweep not carried out`. The settle a place had is counted from the
+loading screen's end.
 
 For each place the report says:
 
