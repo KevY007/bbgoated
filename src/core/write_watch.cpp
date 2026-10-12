@@ -1,4 +1,5 @@
 #include "core/write_watch.h"
+#include "host/perf/core/fault_window_core.h"
 
 #include "log.h"
 
@@ -57,6 +58,7 @@ const bool g_ahead_on = [] {
     return !e || e[0] != '0';
 }();
 constexpr std::uint64_t kAheadPages = 16;  // 64 KiB: what a fault may release past its own page
+std::atomic<std::uint32_t> g_window_pages{0};  // bbgoated: write_watch_set_window_pages
 constexpr std::uint32_t kRecentSeqs = 256;  // "a moment ago", in sequence numbers (one a fault or release)
 
 // Each protected range splits a mapping, and the kernel caps mappings per
@@ -288,17 +290,35 @@ __attribute__((no_stack_protector)) bool write_watch_on_fault(std::uint64_t addr
             ++ahead;
         }
     }
+    // bbgoated (host/perf/fault_window.cpp, BBHOST_BBG_FAULT_WINDOW_KB): the armed pages up to the window's end go too.
+    const std::uint32_t win = g_window_pages.load(std::memory_order_relaxed);
+    if (win) {
+        const std::uint64_t want = bbg::window_ahead(page, win);
+        while (ahead < want) {
+            const Entry* a = entry_of(page + 1 + ahead);
+            if (!a || a->load(std::memory_order_acquire) == 0) break;
+            ++ahead;
+        }
+    }
     // A page that was never protected, or was unmapped since, fails here or
     // faults again; neither is ours to hide, so the handler goes on as before.
     // Writable first, then the sequence number (the header's order) - for
     // the pages ahead too.
+    std::uint64_t tried = 0;  // bbgoated: the pages a failed range call may have made writable all the same
     if (protect_pages(page << kPageShift, (1 + ahead) << kPageShift, true) != 0) {
         if (!ahead || protect_pages(page << kPageShift, 1ull << kPageShift, true) != 0) return false;
+        // bbgoated (host/perf/fault_window.cpp): Linux's mprotect changes the mappings before a hole in the range
+        // (a watched mapping since unmapped keeps its entries) and then fails; with the window those pages count as
+        // written below rather than staying writable and clean. VirtualProtect changes nothing when it fails.
+#if !defined(_WIN32)
+        if (win) tried = ahead;
+#endif
         ahead = 0;  // across two mappings (or views): this page alone
     }
     const std::uint32_t s = next_seq();
     stamp_page(page, *e, s);
     for (std::uint64_t k = 1; k <= ahead; ++k) stamp_page(page + k, *entry_of(page + k), s);
+    for (std::uint64_t k = 1; k <= tried; ++k) stamp_page(page + k, *entry_of(page + k), s);  // bbgoated
     g_changes.fetch_add(1, std::memory_order_acq_rel);
     g_faults.fetch_add(1, std::memory_order_relaxed);
     if (ahead) g_ahead_pages.fetch_add(ahead, std::memory_order_relaxed);
@@ -515,6 +535,8 @@ void write_watch_describe(std::uint64_t va, std::size_t len, const WriteWatch& w
         n += std::snprintf(out + n, cap - static_cast<std::size_t>(n), " %u", e ? e->load() : 0u);
     }
 }
+
+void write_watch_set_window_pages(std::uint32_t pages) { g_window_pages.store(pages, std::memory_order_relaxed); }  // bbgoated
 
 WriteWatchStats write_watch_stats() {
     WriteWatchStats s;
