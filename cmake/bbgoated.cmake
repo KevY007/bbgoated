@@ -31,6 +31,13 @@ endif()
 # Every build: the manifests read cpu_vendor (engine/patch_manifest.cpp).
 target_sources(bbhost PRIVATE src/engine/patch_cpu.cpp)
 
+# A vertex range staged once a recording serves its later draws (host/stage_share.h).
+if(TARGET config_test)
+  add_executable(stage_share_test tests/stage_share_test.cpp)
+  target_include_directories(stage_share_test PRIVATE src)
+  add_test(NAME stage_share_test COMMAND stage_share_test)
+endif()
+
 # The red-zone audit's site table (host/redzone_audit.*), tested on its own.
 if(TARGET config_test AND BBGOATED)
   add_executable(redzone_audit_test tests/redzone_audit_test.cpp src/host/redzone_audit.cpp)

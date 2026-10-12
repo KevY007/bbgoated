@@ -45,6 +45,7 @@
 
 #include "core/write_watch.h"
 #include "host/gpu_internal.h"
+#include "host/stage_share.h"
 #include "log.h"
 
 #include <chrono>
@@ -341,11 +342,20 @@ std::vector<StageChunk> g_stage_held[kSlots];  // each slot's chunks, the last t
 VkDeviceSize g_stage_fill[kSlots] = {};        // bytes used in the slot's last chunk
 std::size_t g_stage_chunks = 0;                // chunks made
 std::atomic<std::uint64_t> g_staged{0}, g_staged_bytes{0}, g_stage_refused{0};
+// bbgoated (BBHOST_VERTEX_STAGE_SHARE, on unless 0): a range a slot's uploads
+// have copied serves the recording's later draws of it (host/stage_share.h).
+const bool g_stage_share = [] {
+    const char* e = std::getenv("BBHOST_VERTEX_STAGE_SHARE");
+    return !(e && e[0] == '0');
+}();
+std::vector<StagedRange<VkBuffer>> g_stage_seen[kSlots];  // what each slot's uploads have copied
+std::atomic<std::uint64_t> g_stage_shared{0}, g_stage_shared_bytes{0};
 
 void stage_release_slot(int slot) {
     for (const StageChunk& c : g_stage_held[slot]) g_stage_free.push_back(c);
     g_stage_held[slot].clear();
     g_stage_fill[slot] = 0;
+    g_stage_seen[slot].clear();
 }
 
 bool new_stage_chunk(StageChunk& c) {
@@ -706,6 +716,20 @@ bool shadow_stage_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
             return false;
         }
     }
+    // Copied already by this recording's uploads (they are begun): the same
+    // bytes, as every copy in them runs before the submission's draws.
+    if (g_stage_share && g_upload_slot == g.slot) {
+        VkBuffer b = VK_NULL_HANDLE;
+        std::uint64_t at = 0;
+        if (stage_share_find(g_stage_seen[g.slot], va, bytes, &b, &at)) {
+            loc.buffer = b;
+            loc.offset = at;
+            loc.avail = bytes;
+            bump(g_stage_shared);
+            g_stage_shared_bytes.fetch_add(bytes, std::memory_order_relaxed);
+            return true;
+        }
+    }
     const VkCommandBuffer cmd = upload_cmd_locked();
     if (!cmd) return false;
     const int slot = g.slot;
@@ -725,6 +749,7 @@ bool shadow_stage_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
     const StageChunk& c = g_stage_held[slot].back();
     const VkBufferCopy region{loc.offset, g_stage_fill[slot], bytes};
     vkCmdCopyBuffer(cmd, loc.buffer, c.buffer, 1, &region);
+    if (g_stage_share) g_stage_seen[slot].push_back({va, bytes, c.buffer, g_stage_fill[slot]});
     loc.buffer = c.buffer;
     loc.offset = g_stage_fill[slot];
     loc.avail = bytes;
@@ -1122,9 +1147,12 @@ std::string shadow_report() {
                       static_cast<unsigned long long>(g_returns));
         out += gr;
     }
-    char st[200];
-    std::snprintf(st, sizeof(st), "; vertex ranges copied for their draw %llu (%.1f MiB), left in host memory %llu, staging chunks %zu (%zu MiB)",
+    char st[300];
+    std::snprintf(st, sizeof(st),
+                  "; vertex ranges copied for their draw %llu (%.1f MiB), served by a copy made earlier in the recording %llu (%.1f MiB), "
+                  "left in host memory %llu, staging chunks %zu (%zu MiB)",
                   static_cast<unsigned long long>(g_staged.load()), static_cast<double>(g_staged_bytes.load()) / (1 << 20),
+                  static_cast<unsigned long long>(g_stage_shared.load()), static_cast<double>(g_stage_shared_bytes.load()) / (1 << 20),
                   static_cast<unsigned long long>(g_stage_refused.load()), g_stage_chunks,
                   static_cast<std::size_t>((g_stage_chunks * kStageChunkBytes) >> 20));
     return out + st;
