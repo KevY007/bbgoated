@@ -6,21 +6,22 @@ bbgoated is droogie/bbhost plus a linear patch stack (`bbg/<topic>:` commits) on
 
 | Base ref | SHA | Taken on |
 |---|---|---|
-| upstream/release/next-steps (draft PR #116) | 63c1cea36749246b05633667df76616b931b0caf | 2026-10-12 |
+| upstream/master (next-steps merged as PR #116, then PR #118 and PR #87) | 566184a74f071166299bb656c4af479e5bbe2771 | 2026-10-12 |
 
 ## Tracked refs (last reviewed)
 
 | Ref | Last reviewed | Date | Notes |
 |---|---|---|---|
-| `upstream/master` | 43d7e958eac7 | 2026-10-12 | v0.2.18 + PR #79 (Wayland setup), PR #92 (libc rand/ctype) |
-| `upstream/release/next-steps` | 63c1cea36749 | 2026-10-12 | the base |
-| `upstream-pr/73` | 3bfcb657eae8 | 2026-10-12 | FIocker DLSS/FSR/FG/Reflex; Phase 2 parts bin (report I) |
+| `upstream/master` | 566184a74f07 | 2026-10-12 | the base: v0.2.18, PR #79 (Wayland setup), PR #92 (libc rand/ctype), next-steps (PR #116), PR #118 (libc errno, stdio, wide and float paths), PR #87 (online: chara-id) |
+| `upstream/release/next-steps` | 63c1cea36749 | 2026-10-12 | merged into master (PR #116) at 63c1cea; the base before 566184a |
+| `upstream-pr/73` | 539d45f41e16 | 2026-10-12 | FIocker DLSS/FSR/FG/Reflex, rebased onto 566184a: adb8f38 temporal upscaling/FG/MV/Reflex squash, 85d81a9 DLSS 3x/4x menu rows, a3a7fa7 FSR descriptor retirement, 539d45f docs; Phase 2 parts bin (report I reviewed 3bfcb65) |
 | `upstream-pr/100` | 7817a4231f8c | 2026-10-12 | Raikzer descriptor reuse / state suppression; Phase 3 candidate |
-| `upstream-pr/116` | 63c1cea36749 | 2026-10-12 | = next-steps |
-| `upstream-pr/117` | 021112fd48bb | 2026-10-12 | dispatch-trace leak fix; taken |
-| `upstream-pr/118` | 72672ad4ae1a | 2026-10-12 | libc formatted stream errors; review when merged |
-| `fiocker/render/dlss-sr-framegen-pipeline` | 3bfcb657eae8 | 2026-10-12 | = PR #73 head |
-| `dlaa/dlaa` | 96cd17d4a4fb | 2026-10-12 | YoucefNabil DLAA fork: its DLAA is taken (ed58faa, fe06cb5 picked as 480d92d, c0ebd6c), with the PR #73 BDA fix and the anti-aliasing hold on top |
+| `upstream-pr/116` | 63c1cea36749 | 2026-10-12 | = next-steps; merged into master |
+| `upstream-pr/117` | 0b0ea897469b | 2026-10-12 | dispatch-trace leak fix; taken (its head rebased onto 566184a, the same change as 021112f) |
+| `upstream-pr/118` | 72672ad4ae1a | 2026-10-12 | libc errno, stdio, wide and float fixes; merged into master, in the base |
+| `upstream-pr/122` | 1ae05f919ee7 | 2026-10-12 | kyo pc settings perf - Phase 3 review |
+| `fiocker/render/dlss-sr-framegen-pipeline` | 539d45f41e16 | 2026-10-12 | = PR #73 head |
+| `dlaa/dlaa` | 96cd17d4a4fb | 2026-10-12 | YoucefNabil DLAA fork: its DLAA is taken (ed58faa, fe06cb5 picked as ae0b56f, 8e42461), with the PR #73 BDA fix and the anti-aliasing hold on top |
 | `bbport/master` | 3c57da4198ad | 2026-10-12 | 0.51; techniques reviewed (report E) |
 | `supermedo/windows` | ec8340a9f9d8 | 2026-10-12 | windows-v1.6; reviewed (report F) |
 
@@ -30,13 +31,9 @@ Rows: upstream SHA | picked SHA | source | reason. Column 1 is plain text on pur
 
 | Upstream SHA | Picked SHA | Source | Reason |
 |---|---|---|---|
-| 8ea60f6 | cfc81e0 | upstream/master (PR #92) | libc ctype table; merged upstream 2026-10-11 |
-| 69580d6 | 0bbf4b6 | upstream/master (PR #92) | libc rand: the guest's 30-bit LCG on Windows (AI rolls, Make Contact); merged upstream |
-| 1822748 | 5db407e | upstream/master (PR #79) | setup window scaling (Wayland); merged upstream |
-| 9c71024 | 681720a | upstream/master (PR #79) | setup window scaling follow-up; merged upstream |
-| 6bab81d | 43039cf | upstream PR #74 (open) | TLS setup shared by sceHttp and account calls, Windows native CA trust for non-Schannel curl; no URL, header or UA change (online path: allowed) |
-| e57427b | ba04e60 | upstream PR #70 (open) | chromatic aberration toggle works on Windows (the user's log: "cannot place chromatic aberration's stub") |
-| 021112f | 9377e61 | upstream PR #117 (open) | dispatch-trace records only inside the coverage window (~14 MiB/min leak in v0.2.18) |
+| 82c58b4 | 31edecf | upstream PR #74 (open) | TLS setup shared by sceHttp and account calls, Windows native CA trust for non-Schannel curl; no URL, header or UA change (online path: allowed); the PR's head rebased onto 566184a, the same change as 6bab81d |
+| 94db371 | 00d3cd8 | upstream PR #70 (open) | chromatic aberration toggle works on Windows (the user's log: "cannot place chromatic aberration's stub"); the PR's head rebased onto 566184a, the same change as e57427b |
+| 0b0ea89 | f171529 | upstream PR #117 (open) | dispatch-trace records only inside the coverage window (~14 MiB/min leak in v0.2.18); the PR's head rebased onto 566184a, the same change as 021112f |
 
 ## Upstream behaviour bbgoated changes by default
 
