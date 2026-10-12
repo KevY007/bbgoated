@@ -8,6 +8,7 @@
 #include "host/gpu_internal.h"
 #include "host/perf/census.h"
 #include "host/perf/vk/cb_ring.h"
+#include "host/perf/vk/cs_buffers.h"
 #include "host/perf/vk/device_mem.h"
 #include "host/shader_patch.h"
 #include "host/shaders/gpu_stall.spv.h"
@@ -2833,6 +2834,7 @@ gcn::TranslateOptions compute_options(std::uint32_t rsrc1, std::uint32_t rsrc2, 
     o.cs_threads[1] = threads[1];
     o.cs_threads[2] = threads[2];
     o.exec_known = g.exec_known;
+    bbg_cs_cb_options(o);  // bbgoated (host/perf/vk/cs_buffers.cpp, BBHOST_BBG_CS_CB=bound): constant buffers bound, in set 1
     return o;
 }
 
@@ -3017,7 +3019,7 @@ VkPipeline create_compute(VkShaderModule module, CsBuild how, const std::string&
     cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     cpci.stage.module = module;
     cpci.stage.pName = "main";
-    cpci.layout = g.pipe_layout;
+    cpci.layout = bbg_cs_cb() ? bbg_cs_pipe_layout() : g.pipe_layout;  // bbgoated (host/perf/vk/cs_buffers.cpp): set 0 as before, then set 1
     cpci.flags = how == CsBuild::kUnoptimized        ? VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT
                  : how == CsBuild::kOptimizedCached ? VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT
                                                      : 0;
@@ -5886,6 +5888,10 @@ bool host_gpu_dispatch(const GpuDispatch& d) {
         params.gds_base = d.gds_base;
         for (std::uint32_t k = 0; k < GpuDispatch::kGdsCounters; ++k) params.gds_counter[k] = d.gds[k].word;
     }
+    // bbgoated (host/perf/vk/cs_buffers.cpp, BBHOST_BBG_CS_CB=bound): the dispatch's constant buffers,
+    // resolved before its params block is placed (cb_valid, cb_bias_dw go into it).
+    std::vector<VkDescriptorBufferInfo> cb_infos;
+    if (bbg_cs_cb()) resolve_dispatch_buffers_locked(pl.meta, d.user_data, params, cb_infos);
     VkDescriptorBufferInfo ubi{};
     alloc_params_slot_locked(params, ubi);
     VkDescriptorSet set = alloc_set_locked();
@@ -5905,6 +5911,8 @@ bool host_gpu_dispatch(const GpuDispatch& d) {
     std::vector<VkDescriptorImageInfo> infos;
     infos.reserve(pl.meta.images.size() + pl.meta.samplers.size() + 1);
     bind_stage_images(set, pl.meta, stage_images, writes, infos, pl.name.c_str());
+    VkDescriptorSet cb_set = VK_NULL_HANDLE;  // bbgoated (host/perf/vk/cs_buffers.cpp): set 1, the constant buffers
+    if (!bbg_cs_cb_set_locked(pl.meta, params, cb_infos, writes, cb_set)) return false;
     vkUpdateDescriptorSets(g.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     // An indirect dispatch's arguments, checked on the GPU just before it
     // reads them (indirect_clamp.cpp): a group count past 65,535 runs nothing.
@@ -5924,6 +5932,7 @@ bool host_gpu_dispatch(const GpuDispatch& d) {
     rec().bind_pipeline(VK_PIPELINE_BIND_POINT_COMPUTE, pl.pipeline);
     const std::uint32_t params_offset = static_cast<std::uint32_t>(ubi.offset);
     rec().bind_sets(VK_PIPELINE_BIND_POINT_COMPUTE, g.pipe_layout, 0, 1, &set, set_cache_on() ? 1 : 0, &params_offset);
+    if (cb_set) bbg_cs_cb_bind_locked(cb_set);  // bbgoated (host/perf/vk/cs_buffers.cpp)
     CapturePtr capture_session;
     if (capture) {
         CaptureDispatch cd;

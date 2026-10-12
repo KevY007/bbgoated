@@ -11,6 +11,7 @@
 #include "host/gpu_internal.h"
 #include "host/perf/vk/async_skip.h"
 #include "host/perf/vk/cb_ring.h"
+#include "host/perf/vk/cs_buffers.h"
 #include "host/shader_patch.h"
 #include "host/tess_lds.h"
 #include "host/translation_cache.h"
@@ -10327,6 +10328,21 @@ void probe_gx_vertex_table(const std::vector<std::uint32_t>& fetch_words, const 
 }
 
 }  // namespace
+
+// bbgoated (host/perf/vk/cs_buffers.cpp, BBHOST_BBG_CS_CB): as a draw's, without the draw's YEBIS
+// windows or Scaleform snapshot, which belong to the last draw, not to this dispatch.
+void gpu::resolve_dispatch_buffers_locked(const gcn::TranslateResult& meta, const std::uint32_t* user, gcn::StageParams& params,
+                                          std::vector<VkDescriptorBufferInfo>& infos) {
+    std::vector<DrawWindow> windows;
+    windows.swap(t_draw_windows);
+    const bool sf = t_snapshot_cbs;
+    t_snapshot_cbs = false;
+    t_dispatch_resolve = true;  // host/perf/vk/cb_ring.cpp: copied only with BBHOST_BBG_CB_SNAPSHOT_CS=1
+    resolve_stage_buffers(meta, user, params, infos, nullptr);
+    t_dispatch_resolve = false;
+    t_snapshot_cbs = sf;
+    t_draw_windows.swap(windows);
+}
 
 void host_gpu_depth_clear(std::uint64_t base, std::uint32_t word, std::uint32_t stencil) {
     std::lock_guard<GpuMutex> lk(g.mu);
