@@ -716,12 +716,13 @@ bool shadow_stage_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
             return false;
         }
     }
-    // Copied already by this recording's uploads (they are begun): the same
-    // bytes, as every copy in them runs before the submission's draws.
+    // Copied already by this recording's uploads (they are begun), from the
+    // same bytes of the same source: every copy in them runs before the
+    // submission's draws (host/stage_share.h).
     if (g_stage_share && g_upload_slot == g.slot) {
         VkBuffer b = VK_NULL_HANDLE;
         std::uint64_t at = 0;
-        if (stage_share_find(g_stage_seen[g.slot], va, bytes, &b, &at)) {
+        if (stage_share_find(g_stage_seen[g.slot], va, bytes, loc.buffer, static_cast<std::uint64_t>(loc.offset), &b, &at)) {
             loc.buffer = b;
             loc.offset = at;
             loc.avail = bytes;
@@ -749,7 +750,7 @@ bool shadow_stage_locked(std::uint64_t va, std::uint64_t bytes, Located& loc) {
     const StageChunk& c = g_stage_held[slot].back();
     const VkBufferCopy region{loc.offset, g_stage_fill[slot], bytes};
     vkCmdCopyBuffer(cmd, loc.buffer, c.buffer, 1, &region);
-    if (g_stage_share) g_stage_seen[slot].push_back({va, bytes, c.buffer, g_stage_fill[slot]});
+    if (g_stage_share) g_stage_seen[slot].push_back({va, bytes, loc.buffer, static_cast<std::uint64_t>(loc.offset), c.buffer, g_stage_fill[slot]});
     loc.buffer = c.buffer;
     loc.offset = g_stage_fill[slot];
     loc.avail = bytes;
