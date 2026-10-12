@@ -1018,6 +1018,7 @@ void occlusion_device_ready_locked();     // after the slots are made
 void occlusion_begin_recording_locked();  // a recording's first commands
 bool occlusion_draw_entry();              // host_gpu_draw's start: false when SET_PREDICATION culls the draw
 void occlusion_draw_locked(DrawCall& call);
+bool occlusion_interval_open_locked();  // bbgoated (host/perf/vk/async_skip.cpp): a draw now would get a query
 void occlusion_submit_locked();  // before the submission's label writes
 void occlusion_record_cond(VkCommandBuffer cmd, const DrawCall& call, bool begin);
 std::string occlusion_report(bool totals);
