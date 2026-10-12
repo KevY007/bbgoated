@@ -35,25 +35,18 @@ bbgoated is **fully separate from bbhost** and any other launcher:
 - **If you already use bbhost:** on bbgoated's first start it copies over:
   - your game paths and online server (into `bbgoated.toml`, without bbhost's data folder);
   - your F10 settings, key bindings and signed-in account (into `bbgoated-options.toml`);
-  - your official plugins;
+  - your plugins (the whole plugins folder, signatures included);
   - your saves (`saves\` and `save-backups\`), shader caches and downloaded assets (`bbhost\`) and trophies, from the data folder bbhost's config names (or bbhost's default; or a `data` folder beside the eboot, bbhost's old default).
 
-  bbhost's files are only read. Saves are never copied into a bbgoated data folder that already has some, and no file there is ever replaced. The log says `bbgoated: first start - ... imported` and `bbgoated: copied saves ...`, and a marker file in the data folder stops the save copy from ever happening again. From then on the two programs have separate settings and separate progress, and changing one never affects the other.
+  bbhost's files are only read. Saves are never copied into a bbgoated data folder that already has some, and no file there is ever replaced. The log says `bbgoated: first start - ... imported` and `bbgoated: copied saves ...`, and a marker file in the data folder stops the save copy from ever happening again. From then on the two programs have separate settings and separate progress: changing one's never affects the other's. (The account is the one exception: see Online.)
 - **If you don't:** the setup window asks for the two paths (the game folder that holds `dvdroot_ps4`, and the decrypted eboot) and offers to link a Hunter's Dream account.
-- **If bbhost is running during bbgoated's first start:** the save copy waits until a start when it isn't, so a save being written is never copied half-done.
+- **If bbhost is running during bbgoated's first start,** or its data folder isn't there yet (a drive not mounted): the save copy waits for a later start, so a save being written is never copied half-done. If anything can't come over (a full disk, say), a later start copies what is missing, but never copies bbhost's saves into progress made in bbgoated.
 
 Thanks to the copied shader caches the first start goes straight in. Without them (no bbhost before, or after deleting them) it builds the caches first ("Building shaders: N left"), which takes a few minutes once.
 
-### Playing the same saves in both
+### bbhost's data folder is off limits
 
-If you'd rather share one save folder, so progress continues in both, point bbgoated at bbhost's data folder in `%APPDATA%\bbgoated\bbgoated.toml`:
-
-```toml
-[paths]
-data = "E:/Bloodborne/GameSaveData"   # the folder bbhost's bbhost.toml names
-```
-
-Then never run both at once. bbhost keeps backups of the newest saves in `save-backups\`.
+bbgoated never runs on bbhost's data folder, or on a folder inside it. Its saves, its backup rotation (which deletes old backups) and its temporary files would be bbhost's. If `bbgoated.toml`, `--data` or the setup window's Data folder names it, bbgoated logs `bbgoated: the data folder ... is bbhost's` and uses its own. To bring bbhost progress over again later, copy the save folders yourself while neither program runs.
 
 ## 4. Online
 
@@ -61,6 +54,7 @@ bbgoated is a bbhost client to The Hunter's Dream. You meet ordinary bbhost play
 
 - **One at a time:** don't run bbhost and bbgoated at the same time with the same account. bbgoated logs a warning when it sees `bbhost.exe` running.
 - **Windows Firewall:** it asks once for the new exe. Allow it: the P2P port is UDP 9307, and a blocked port is the most common reason summons fail.
+- **Signing out** in either program signs out both: they use the one sign-in that came over on the first start, and signing out ends it on the server. Sign in again in each afterwards.
 - **"Recover account":** never use it to "move" your account to bbgoated. It cancels every other device's sign-in, bbhost's included. bbgoated doesn't need it: your sign-in came over on the first start.
 - **No cheats:** bbgoated ships none. The debug menu plugin used against other players gets accounts banned.
 

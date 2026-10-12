@@ -159,6 +159,77 @@ void bbhost_saves_beside_its_eboot() {
     CHECK(slurp(h.own_data() / "saves" / "SPRJ0005" / "userdata0000") == "old-default-save");
 }
 
+// bbhost's parser takes "[ paths ]", a tab after "[paths]" and a top-level
+// "paths.data" for the same key: none of them may carry bbhost's data folder over.
+void odd_paths_spellings_stay_behind() {
+    const char* headers[] = {"[ paths ]\ndata = \"%s\"\n", "[paths]\t\ndata = \"%s\"\n", "paths.data = \"%s\"\n[paths]\n"};
+    int i = 0;
+    for (const char* fmt : headers) {
+        Home h(("bbg_odd_paths_" + std::to_string(i++)).c_str());
+        char body[512];
+        std::snprintf(body, sizeof(body), fmt, h.bbhost_data().generic_string().c_str());
+        spit(h.bbhost_toml(), std::string(body) + "app0 = \"" + (h.root / "game").generic_string() + "\"\n");
+        const HostConfig c = load();
+        CHECK(slurp(h.own_toml()).find("bbhost-data") == std::string::npos);
+        CHECK(fs::path(c.data) == h.own_data());
+    }
+}
+
+// Whatever names bbhost's data folder for bbgoated - its own config, however
+// spelled - bbgoated keeps its own: its saves, their backup rotation and tmp
+// would otherwise be bbhost's.
+void never_runs_on_bbhosts_data() {
+    Home h("bbg_never_bbhost_data");
+    load();  // the first start, as usual
+    for (const std::string& spelled : {h.bbhost_data().generic_string(), h.bbhost_data().generic_string() + "/",
+                                       (h.bbhost_data() / "saves" / "..").generic_string(), (h.bbhost_data() / "saves").generic_string()}) {
+        spit(h.own_toml(), "[paths]\napp0 = \"" + (h.root / "game").generic_string() + "\"\ndata = \"" + spelled + "\"\ntmp = \"" +
+                               (h.bbhost_data() / "tmp").generic_string() + "\"\n");
+        const HostConfig c = load();
+        CHECK(fs::path(c.data) == h.own_data());
+        CHECK(fs::path(c.tmp) == h.own_data() / "tmp");
+    }
+}
+
+// The saves came over and the caches did not: the guard file goes with the
+// saves, so a later start never copies bbhost's saves or backups into the
+// progress made since.
+void a_failed_cache_copy_keeps_saves_closed() {
+    Home h("bbg_cache_fail");
+    spit(h.bbhost_data() / "bbhost" / "translation-cache.bin", "tc");
+    spit(h.own_data() / "bbhost", "a file where the cache folder goes");  // the cache copy fails
+    load();
+    CHECK(slurp(h.own_data() / "saves" / "SPRJ0005" / "userdata0000") == "save-bytes");
+    CHECK(!fs::exists(h.own_data() / "saves.copying"));
+    CHECK(!fs::exists(h.own_data() / "bbgoated-saves-from-bbhost.txt"));  // the caches are tried again
+    spit(h.bbhost_data() / "saves" / "SPRJ0005" / "userdata0001", "bbhost-later");
+    spit(h.bbhost_data() / "save-backups" / "SPRJ0005" / "20991231" / "userdata0000", "bbhost-backup");
+    load();
+    CHECK(!fs::exists(h.own_data() / "saves" / "SPRJ0005" / "userdata0001"));
+    CHECK(!fs::exists(h.own_data() / "save-backups" / "SPRJ0005" / "20991231"));
+}
+
+// A first start while bbhost ran copied nothing, and the game made an empty
+// saves folder: the next start still copies the saves.
+void an_empty_saves_folder_is_not_progress() {
+    Home h("bbg_empty_saves");
+    fs::create_directories(h.own_data() / "saves" / "SPRJ0005");
+    load();
+    CHECK(slurp(h.own_data() / "saves" / "SPRJ0005" / "userdata0000") == "save-bytes");
+}
+
+// bbhost's data folder is not there (a drive not mounted yet): nothing is
+// marked copied, and a later start copies the saves.
+void a_missing_source_is_tried_again() {
+    Home h("bbg_missing_source");
+    fs::rename(h.bbhost_data(), h.root / "away");
+    load();
+    CHECK(!fs::exists(h.own_data() / "bbgoated-saves-from-bbhost.txt"));
+    fs::rename(h.root / "away", h.bbhost_data());
+    load();
+    CHECK(slurp(h.own_data() / "saves" / "SPRJ0005" / "userdata0000") == "save-bytes");
+}
+
 void copied_once_only() {
     Home h("bbg_once_only");
     load();
@@ -196,6 +267,11 @@ int main() {
     finishes_a_copy_cut_short();
     saves_kept_caches_still_copied();
     bbhost_saves_beside_its_eboot();
+    odd_paths_spellings_stay_behind();
+    never_runs_on_bbhosts_data();
+    a_failed_cache_copy_keeps_saves_closed();
+    an_empty_saves_folder_is_not_progress();
+    a_missing_source_is_tried_again();
     copied_once_only();
     config_dir_override_imports_nothing();
     if (g_fail) {
