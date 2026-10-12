@@ -6,7 +6,7 @@ bbgoated is droogie/bbhost plus a linear patch stack (`bbg/<topic>:` commits) on
 
 | Base ref | SHA | Taken on |
 |---|---|---|
-| upstream/master (next-steps merged as PR #116, then PR #118 and PR #87) | 566184a74f071166299bb656c4af479e5bbe2771 | 2026-10-12 |
+| upstream/master (v0.2.18 + PR #92, #79, #118, next-steps as PR #116, and PR #87) | 566184a74f071166299bb656c4af479e5bbe2771 | 2026-10-12 |
 
 ## Tracked refs (last reviewed)
 

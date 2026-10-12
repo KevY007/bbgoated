@@ -17,7 +17,7 @@ Cloud run of 2026-10-12 (session https://claude.ai/code/session_01CwcqehwvDGj2RG
 ## Facts checked before the rebase
 
 - `upstream/master` = 566184a74f07; 63c1cea is its ancestor; `git rev-list --count upstream/master..upstream/release/next-steps` = 0.
-- 63c1cea..566184a lists 144 commits, but the tree changes in 25 files only: master's first-parent history has its own root (a3847b6, the public v0.2.x line) and joined next-steps' history at the PR #116 merge (02b882c); that line's code was already in next-steps. What 566184a adds over 63c1cea: PR #79 and PR #92 (bbgoated had both), PR #118 (libc errno, stdio, wide and float paths, `host_thread_set_name`, five new libc tests) and PR #87 (`src/engine/chara_id.cpp`, the prologue hook at 0x2043ee0, installed from `hle_patch_guest`).
+- 63c1cea..566184a lists 31 commits, and the tree changes in 25 files: master's first-parent merges are PR #92, #79, #118, next-steps as PR #116 (02b882c) and PR #87; both lines share the one root a3847b6 and fork at v0.2.18 (c421ea0). (The cloud clone was shallow and first counted 144 commits and a separate root; the controller corrected this from a full clone.) What 566184a adds over 63c1cea: PR #79 and PR #92 (bbgoated had both), PR #118 (libc errno, stdio, wide and float paths, `host_thread_set_name`, five new libc tests) and PR #87 (`src/engine/chara_id.cpp`, the prologue hook at 0x2043ee0, installed from `hle_patch_guest`).
 - Dropped picks are in master: 8ea60f6, 69580d6, 1822748 and 9c71024 are ancestors of 566184a, and `src/host/launcher.cpp`, `src/hle/libc_ctype.h`, `src/hle/libc_random.h` and their two tests are byte-identical between 681720a (the old stack with all four picks applied) and 566184a. The second PR #79 pick was 5db407e (`git log --grep="cherry picked from commit 1822748"`).
 - New PR heads are one commit each on 566184a: PR #74 82c58b4, PR #70 94db371, PR #117 0b0ea89 (parents 566184a). PR #73 is 539d45f, four commits on 566184a (adb8f38, 85d81a9, a3a7fa7, 539d45f); FIocker's `render/dlss-sr-framegen-pipeline` is the same 539d45f (`git ls-remote`). PR #122 is 1ae05f9, one commit on 566184a. PR #100 has not moved (7817a4231f8c); the DLAA fork's `dlaa` has not moved (96cd17d4a4fb).
 - `origin/bbgoated/main` was still a00921d when I pushed.
@@ -135,7 +135,7 @@ online paths CHANGED since 566184a:
   82568c5 tmp: a non-pick edit to chara_id.cpp  (not an upstream cherry-pick)
 exit=1
 ```
-Why the base had to move: with `-Base 63c1cea` on the new branch the script lists 23 of upstream master's own commits (master's separate history down to a3847b6, the merge commits, PR #87 and PR #118's thread naming) as `not an upstream cherry-pick`, exit 1.
+Why the base had to move: with `-Base 63c1cea` on the new branch the script lists 4 of upstream master's own commits as `not an upstream cherry-pick`, exit 1: the merges 566184a (PR #87) and 02b882c (PR #116), 59da4a6 (PR #118's portable thread naming) and 32ab067 (PR #87's chara-id). (Corrected from a full clone; the shallow cloud clone listed 23.)
 
 ## Test results
 
