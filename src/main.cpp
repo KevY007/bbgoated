@@ -38,6 +38,9 @@
 #include "host/frame_stats.h"
 #include "host/win_crash.h"
 #include "host/window.h"
+#if defined(BBHOST_HAVE_SDL3)
+#include "host/dlaa.h"
+#endif
 #include "log.h"
 
 #include "bbhost_version.h"
@@ -129,6 +132,11 @@ void run_guest_start(GuestStart fn, void* argv, bool windowed) {
     auto pump_until_done = [&](auto is_done) {
         while (!is_done()) {
             if (host_gpu_device_lost()) device_lost_exit(windowed);
+#if defined(BBHOST_HAVE_SDL3)
+            // bbgoated: the game's anti-aliasing held off while DLAA runs, with a
+            // window or without one - a headless run measures what a player gets.
+            gpu::dlaa_aa_tick();
+#endif
             if (windowed && !host_window_pump()) {
                 host_log("window closed");
                 host_gpu_save_pipeline_cache_at_exit();
