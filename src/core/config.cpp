@@ -846,6 +846,13 @@ bool config_load(int argc, char** argv, HostConfig* out, std::string* error) {
 #endif
     apply_values(merged, &c);
     g_values = merged;
+    // bbgoated (docs/bbgoated/pr73-port.md, R3 and R5): with no [dlss] mode in any layer a
+    // run starts with DLAA, as the DLAA fork's builds did, unless [dlaa] enabled turns it
+    // off. Where NGX cannot run (another GPU, no bridge) DLAA turns itself off (dlaa.cpp).
+    if (config_value("dlss.mode").empty()) {
+        const std::string v = config_value("dlaa.enabled");
+        c.dlss_mode = v == "false" || v == "0" || v == "off" ? "off" : "dlaa";
+    }
     // The file a player edits: the user config, once there is one.
     c.config_path = file_exists(user_cfg) ? user_cfg : !explicit_cfg.empty() ? explicit_cfg : local_cfg;
     c.config_layers = layers;
@@ -1205,7 +1212,10 @@ bool config_write_template(const std::string& path) {
            "\n[dlss]\n"
            "# Requires an NVIDIA RTX GPU and ngx_bridge.dll/nvngx_dlss.dll beside bbhost.\n"
            "# off, dlaa, quality, balanced, performance, ultra_performance.\n"
-           "mode = \"off\"\n"
+           // bbgoated (pr73-port.md, R3): the mode only as a comment - a key written here would
+           // win over the DLAA default for every new player.
+           "# Unset: DLAA where NGX runs (an NVIDIA RTX GPU and the files above), else off.\n"
+           "# mode = \"off\"\n"
            "# Output size; 0 follows the selected display resolution.\n"
            "# SR presets automatically choose a lower game render size.\n"
            "output_width = 0\n"

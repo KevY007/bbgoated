@@ -66,7 +66,7 @@ Patch switches go under `[patches]` in `%APPDATA%\bbgoated\bbgoated.toml`. Envir
 |---|---|---|
 | Intel tone-map fix | on, on Intel CPUs only | `intel-tonemap = false` |
 | The Old Hunters | on | `old-hunters = false` |
-| NVIDIA DLAA (RTX cards; other GPUs skip it) | on | `enabled = false` under `[dlaa]`; `Ctrl+F1` or `Ctrl+F5` in game |
+| NVIDIA DLAA (RTX cards; other GPUs skip it) | on | `mode = "off"` under `[dlss]` (it wins over `[dlaa]`), or `enabled = false` under `[dlaa]`; `BBHOST_DLSS_MODE=off` or `BBHOST_DLAA=0`; `Ctrl+F1` or `Ctrl+F5` in game |
 | DLAA's DLSS preset (a letter, e.g. `K`) | the driver's | `preset = "K"` under `[dlaa]` |
 | next-steps' per-draw vertex copies (a ring kept in host memory, copied for each draw) | off | `BBHOST_VERTEX_STAGE=1`; with it on, `BBHOST_VERTEX_STAGE_SHARE=0` copies for every draw |
 | Light-grid tiles from the render size instead of the window | off | `BBHOST_LIGHT_GRID_BASIS=render` |

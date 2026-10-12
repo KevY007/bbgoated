@@ -102,6 +102,26 @@ int main() {
     CHECK(load("[dlss]\nobject_motion = true\n").dlss_object_motion);
     CHECK(!load("[dlss]\nobject_motion = false\n").dlss_object_motion);
 
+    // bbgoated (docs/bbgoated/pr73-port.md, R3 and R5): with no [dlss] mode in any layer a run
+    // starts with DLAA, as the DLAA fork's builds did, unless [dlaa] enabled turns it off. A
+    // [dlss] mode that is set wins over [dlaa] enabled, and [dlaa] preset is still read.
+    CHECK(load("").dlss_mode == "dlaa");
+    CHECK(config_value("dlss.mode").empty());  // the default is not a key a file sets
+    CHECK(load("[dlss]\nmode = \"\"\n").dlss_mode == "dlaa");
+    CHECK(load("[dlaa]\nenabled = true\n").dlss_mode == "dlaa");
+    CHECK(load("[dlaa]\nenabled = false\n").dlss_mode == "off");
+    CHECK(load("[dlaa]\nenabled = \"off\"\n").dlss_mode == "off");
+    CHECK(load("[dlaa]\nenabled = 0\n").dlss_mode == "off");
+    CHECK(load("[dlss]\nmode = \"off\"\n").dlss_mode == "off");
+    CHECK(load("[dlss]\nmode = \"off\"\n\n[dlaa]\nenabled = true\n").dlss_mode == "off");
+    CHECK(load("[dlss]\nmode = \"dlaa\"\n\n[dlaa]\nenabled = false\n").dlss_mode == "dlaa");
+    CHECK(load("[dlss]\nmode = \"quality\"\n").dlss_mode == "quality");
+    {
+        HostConfig c = load("[dlaa]\npreset = \"K\"\n");
+        CHECK(c.dlss_mode == "dlaa");
+        CHECK(config_value("dlaa.preset") == "K");
+    }
+
     // A note after a quoted value is not part of it.
     {
         HostConfig c = load("[online]\nhost = \"192.168.1.50\"  # added by bbhost v0.2.0: the server\n"
@@ -184,6 +204,10 @@ int main() {
         std::string err;
         CHECK(config_parse_toml(t.string(), &kv, &err));
         CHECK(kv["player.ime"] == "\"type\"");
+        // bbgoated (R3): [dlss] mode only as a comment - a written mode would win over the
+        // DLAA default for every new player.
+        CHECK(!kv.count("dlss.mode"));
+        CHECK(read(t).find("# mode = \"off\"") != std::string::npos);
     }
 
     // The game folder, then an update folder beside it: "-patch", and

@@ -47,9 +47,11 @@ retirement) and 539d45f (docs).
   elsewhere; super resolution and FSR are opt-in.** PR #73's default is `[dlss] mode = "off"`, so
   bbgoated changes it in two places, each marked:
   - with no `[dlss] mode` set (in the config files or `BBHOST_DLSS_MODE`), the mode seeds DLAA
-    unless `[dlaa] enabled` is false (R5): Task 4's transitional block and, from Task 5, the
-    `kDlssMode` seed in `host_options_load()` (`options.cpp` h11), with `config_value("dlss.mode")`
-    telling a set key from the default;
+    unless `[dlaa] enabled` is false (R5). Task 4 put the seed in `config_load()` (`config.cpp`,
+    after the layers merge; `config_value("dlss.mode")` tells a set key from the default), so
+    `config().dlss_mode` carries it to Task 4's transitional block and, from Task 5, to the
+    `kDlssMode` seed in `host_options_load()` (`options.cpp` h11) and the setup window as they
+    are; `BBHOST_DLSS_MODE` still wins (the transitional block, then h14);
   - the first-start template (`config.cpp` h3) and `bbhost.example.toml` (h1) do not write
     `mode = "off"`: a written key would win over the default (R5), so it goes in as a comment.
 
@@ -160,7 +162,8 @@ hand after applying its hunks (the dry run in section F makes each one against a
   `g_set[kFrameGeneration].index = 0;` in the `BBHOST_DLAA` block), and until (d) their object-motion
   parts; `launcher.cpp` likewise (variables, label arrays, `[dlss]` saves, `host_opt_set*` calls,
   combos, notes; `if (upscaler_backend == 0 || fg_backend == 0)` keeps `upscaler_backend == 0`).
-  Then the marked R3 edits: the DLAA seed beside h11's seeds, and h6/h7 narrowed to SR and FSR.
+  Then the marked R3 edit: h6/h7 narrowed to SR and FSR (h11 needs none: since Task 4
+  `config().dlss_mode` carries the DLAA seed).
 - (d) `options.cpp`/`launcher.cpp`: PR #73's object-motion parts of the same hunks.
 
 Gone since the rebase: C1 (translate.h h2 against the GDS asserts: 539d45f's h2 keeps both asserts

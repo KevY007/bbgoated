@@ -80,8 +80,10 @@ fps_cap = 30
 [dlss]
 upscaler_backend = "dlss" # dlss, fsr3, or fsr4 (optional model download)
 # Off, native DLAA, or a super-resolution preset. Setup and F10 share these
-# choices. Restart after changing any temporal-rendering setting.
-mode = "off" # off, dlaa, quality, balanced, performance, ultra_performance
+# choices. Restart after changing any temporal-rendering setting. Unset
+# (bbgoated): DLAA where NGX runs (an NVIDIA RTX GPU with ngx_bridge.dll and
+# nvngx_dlss.dll), else off; [dlaa] enabled = false also turns it off.
+# mode = "off" # off, dlaa, quality, balanced, performance, ultra_performance
 # 0 follows the selected display resolution, including custom sizes. SR
 # presets choose a lower input size automatically; BBHOST_RES overrides it.
 output_width = 0
