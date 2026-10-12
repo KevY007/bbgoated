@@ -14,7 +14,9 @@
 #include "host/translation_cache.h"
 
 #include "host/draw_capture.h"
+#include "host/perf/bbg_perf.h"
 #include "host/perf/census.h"
+#include "host/perf/core/lazy_barriers_core.h"
 #include "gcn/container.h"
 #include "gcn/lift.h"
 #include "gcn/names.h"
@@ -330,10 +332,17 @@ struct PassHazards {
     std::unordered_set<std::uint64_t> sampled;  // texture bases sampled since the last barrier
 };
 PassHazards g_hazards;
-const bool g_lazy_barriers = [] {
-    const char* e = std::getenv("BBHOST_PASS_BARRIERS");
-    return e && std::strcmp(e, "lazy") == 0;
-}();
+// BBHOST_PASS_BARRIERS=lazy turns them on, any other value off; unset, they
+// are on only on NVIDIA with BBHOST_BBG_LAZY_BARRIERS_NV=1 (bbgoated: the
+// known failure above is AMD's compressed targets). Both are read at the first
+// use, once main() has applied the presets (host/perf/bbg_perf.h); the vendor
+// is asked each time, because a headless run's first flip report can come
+// before the device is made. Under g.mu.
+bool lazy_barriers() {
+    static const int env = bbg::pass_barriers_env(std::getenv("BBHOST_PASS_BARRIERS"));
+    static const bool nv = bbg::perf_on("LAZY_BARRIERS_NV");
+    return bbg::lazy_barriers_on(env, nv, g.vendor_id);
+}
 std::atomic<std::uint64_t> g_barriers_paid{0}, g_barriers_skipped{0}, g_barriers_mid_pass{0};
 
 std::atomic<std::uint64_t> g_rt_created{0}, g_untraced_draws{0}, g_clears{0}, g_rt_copies{0};
@@ -6547,7 +6556,7 @@ void pay_pass_barrier_locked() {
 // A pass ended for the next draw's pass: its barrier owed (lazy pass barriers).
 void end_pass_for_draw_locked() {
     if (!g_pass.active) return;
-    if (!g_lazy_barriers) {
+    if (!lazy_barriers()) {
         render_end_pass_locked();
         return;
     }
@@ -8763,7 +8772,7 @@ void render_pipeline_time_us(std::uint64_t out[5]) {
 bool render_pass_open_locked() { return g_pass.active; }
 
 std::string render_barriers_report() {
-    if (!g_lazy_barriers) return "";
+    if (!lazy_barriers()) return "";
     char b[200];
     std::snprintf(b, sizeof(b), "pass barriers (lazy): %llu paid, %llu left out, %llu of the paid in the middle of a pass",
                   static_cast<unsigned long long>(g_barriers_paid.load()), static_cast<unsigned long long>(g_barriers_skipped.load()),
@@ -14494,7 +14503,7 @@ static bool draw_impl(const GpuDraw& d) {
     // Lazy pass barriers: what this draw samples against the targets written
     // since the last barrier, and noted for the passes after it.
     bool sample_hazard = false;
-    if (g_lazy_barriers) {
+    if (lazy_barriers()) {
         for (int st = 0; st < 2; ++st) {
             for (const StageImages::Image& im : stage_images[st].images) {
                 if (!im.resolved) continue;
