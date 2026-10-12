@@ -67,6 +67,11 @@ std::uint32_t write_watch_dirty(std::uint64_t va, std::size_t len, WriteWatch& w
 // `frame`: the faulting pc and up to seven return addresses (the top of the
 // stack and [rbp+8]) the handler read, for the writer census; may be null.
 bool write_watch_on_fault(std::uint64_t addr, bool is_write, const std::uint64_t* frame = nullptr);
+// bbgoated (host/perf/fault_window.cpp, BBHOST_BBG_FAULT_WINDOW_KB): a fault
+// also releases the armed pages to the end of its `pages`-page window (a power
+// of two; 0: upstream's look-ahead alone). Any thread; the handler reads it
+// with one relaxed load.
+void write_watch_set_window_pages(std::uint32_t pages);
 // Return addresses recorded with faults into [va, va+len) (a ring of the
 // last 16384 faults, eight addresses each): who writes a watched surface.
 // Returns how many distinct ones were written to `pcs`.

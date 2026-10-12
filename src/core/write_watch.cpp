@@ -1,5 +1,6 @@
 #include "core/write_watch.h"
 
+#include "host/perf/core/fault_window_core.h"
 #include "log.h"
 
 #include <algorithm>
@@ -58,6 +59,7 @@ const bool g_ahead_on = [] {
 }();
 constexpr std::uint64_t kAheadPages = 16;  // 64 KiB: what a fault may release past its own page
 constexpr std::uint32_t kRecentSeqs = 256;  // "a moment ago", in sequence numbers (one a fault or release)
+std::atomic<std::uint32_t> g_window_pages{0};  // bbgoated: write_watch_set_window_pages
 
 // Each protected range splits a mapping, and the kernel caps mappings per
 // process (vm.max_map_count, 65530 on many systems). Arming stops well short of
@@ -283,6 +285,15 @@ __attribute__((no_stack_protector)) bool write_watch_on_fault(std::uint64_t addr
             ++run;
         }
         while (ahead < run) {
+            const Entry* a = entry_of(page + 1 + ahead);
+            if (!a || a->load(std::memory_order_acquire) == 0) break;
+            ++ahead;
+        }
+    }
+    // bbgoated (host/perf/fault_window.cpp, BBHOST_BBG_FAULT_WINDOW_KB): the armed pages up to the window's end go too.
+    if (const std::uint32_t win = g_window_pages.load(std::memory_order_relaxed)) {
+        const std::uint64_t want = bbg::window_ahead(page, win);
+        while (ahead < want) {
             const Entry* a = entry_of(page + 1 + ahead);
             if (!a || a->load(std::memory_order_acquire) == 0) break;
             ++ahead;
@@ -526,3 +537,5 @@ WriteWatchStats write_watch_stats() {
     s.ahead_pages = g_ahead_pages.load();
     return s;
 }
+
+void write_watch_set_window_pages(std::uint32_t pages) { g_window_pages.store(pages, std::memory_order_relaxed); }  // bbgoated
