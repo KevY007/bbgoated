@@ -674,6 +674,14 @@ void apply(int id) {
 // version stays.
 constexpr int kOptionsVersion = 3;
 
+// bbgoated (host_opt_hold): for each setting held at a live value, the index
+// the file keeps - the player's choice - else -1.
+int g_file_index[kSettingCount] = {};
+bool g_file_index_set = [] {
+    for (int& i : g_file_index) i = -1;
+    return true;
+}();
+
 void save() {
     if (!g_dirty) {
         return;
@@ -690,7 +698,9 @@ void save() {
     for (const Setting& s : g_set) {
         // A resolution still waiting for its keep-or-revert answer is not
         // saved: the file keeps the one it would go back to.
-        const int index = &s == &g_set[kResolution] && g_res_prev >= 0 ? g_res_prev : s.index;
+        const int index = &s == &g_set[kResolution] && g_res_prev >= 0 ? g_res_prev
+                          : g_file_index[&s - g_set] >= 0              ? g_file_index[&s - g_set]  // held: the player's
+                                                                       : s.index;
         std::fprintf(f, "%s = \"%s\"\n", s.key, s.values[static_cast<std::size_t>(index)]);
     }
     host_bindings_save(f);
@@ -789,6 +799,7 @@ void set_index(int id, int index, bool from_file) {
     Setting& s = g_set[id];
     const int n = static_cast<int>(s.values.size());
     index = ((index % n) + n) % n;
+    if (!from_file) g_file_index[id] = -1;  // the player's change ends a hold (host_opt_hold)
     if (index == s.index && from_file) {
         return;
     }
@@ -1461,7 +1472,7 @@ void host_opt_set(const char* key, bool on) {
                 want = static_cast<int>(v);
             }
         }
-        if (want == s.index) return;  // the setup window sets every one; only a change is written
+        if (want == s.index && g_file_index[id] < 0) return;  // the setup window sets every one; only a change is written
         set_index(id, want, false);
         // The F10 screen saves when it closes; a row in the game's menu has no
         // such moment, so a change made there is written now or not at all.
@@ -1475,6 +1486,44 @@ int host_opt_index(const char* key) {
         if (std::strcmp(key, g_set[id].key) == 0) return g_set[id].index;
     }
     return -1;
+}
+
+namespace {
+int setting_named(const char* key) {
+    for (int id = 0; key && id < kSettingCount; ++id) {
+        if (std::strcmp(key, g_set[id].key) == 0) return id;
+    }
+    return -1;
+}
+int on_index(int id, bool on) {
+    const Setting& s = g_set[id];
+    int want = on ? 1 : 0;
+    for (std::size_t v = 0; v < s.values.size(); ++v) {
+        if (std::strcmp(s.values[v], on ? "On" : "Off") == 0) want = static_cast<int>(v);
+    }
+    return want;
+}
+}  // namespace
+
+void host_opt_hold(const char* key, bool on) {
+    const int id = setting_named(key);
+    if (id < 0) return;
+    const int keep = g_file_index[id] >= 0 ? g_file_index[id] : g_set[id].index;
+    set_index(id, on_index(id, on), true);  // live only: nothing to write
+    g_file_index[id] = keep;
+}
+
+void host_opt_release(const char* key) {
+    const int id = setting_named(key);
+    if (id < 0 || g_file_index[id] < 0) return;
+    const int back = g_file_index[id];
+    g_file_index[id] = -1;
+    set_index(id, back, true);
+}
+
+bool host_opt_held(const char* key) {
+    const int id = setting_named(key);
+    return id >= 0 && g_file_index[id] >= 0;
 }
 
 void host_opt_set_index(const char* key, int index) {

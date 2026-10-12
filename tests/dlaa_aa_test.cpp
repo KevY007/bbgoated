@@ -1,5 +1,6 @@
-// host/dlaa_aa.cpp (bbgoated): the game's anti-aliasing goes off while DLAA runs
-// and comes back when DLAA is turned off - if the player had it on.
+// host/dlaa_aa.cpp (bbgoated): the game's anti-aliasing is held off while DLAA
+// runs - the options file keeping the player's choice - and given back when
+// DLAA is turned off.
 #include "host/dlaa_aa.h"
 
 #include <cstdio>
@@ -12,20 +13,13 @@ int main() {
             ++fail;
         }
     };
-    {
-        DlaaAaState s;
-        check(dlaa_aa_step(&s, false, true) == kDlaaAaKeep, "DLAA off, AA on: nothing to do");
-        check(dlaa_aa_step(&s, true, true) == kDlaaAaTurnOff, "DLAA turns on: the game's AA goes off");
-        check(dlaa_aa_step(&s, true, false) == kDlaaAaKeep, "DLAA on, AA off: nothing to do");
-        check(dlaa_aa_step(&s, true, true) == kDlaaAaTurnOff, "AA turned back on while DLAA runs: off again");
-        check(dlaa_aa_step(&s, false, false) == kDlaaAaTurnOn, "DLAA off: the player's AA comes back");
-        check(dlaa_aa_step(&s, false, true) == kDlaaAaKeep, "and stays as the player has it");
-    }
-    {
-        DlaaAaState s;
-        check(dlaa_aa_step(&s, true, false) == kDlaaAaKeep, "AA was off already when DLAA started");
-        check(dlaa_aa_step(&s, false, false) == kDlaaAaKeep, "DLAA off: AA stays off (the player had it off)");
-    }
+    check(dlaa_aa_step(true, true, false) == kDlaaAaHold, "DLAA runs, the game's AA on: held off");
+    check(dlaa_aa_step(true, true, true) == kDlaaAaHold, "turned on again from a menu while DLAA runs: held off again");
+    check(dlaa_aa_step(true, false, true) == kDlaaAaKeep, "DLAA runs, AA held off: nothing to do");
+    check(dlaa_aa_step(true, false, false) == kDlaaAaKeep, "DLAA runs, the player has AA off: nothing to do");
+    check(dlaa_aa_step(false, false, true) == kDlaaAaRelease, "DLAA turned off: AA back to the player's setting");
+    check(dlaa_aa_step(false, true, false) == kDlaaAaKeep, "DLAA off, AA on: nothing to do");
+    check(dlaa_aa_step(false, false, false) == kDlaaAaKeep, "DLAA off, the player has AA off: it stays off");
     if (!fail) std::printf("dlaa_aa_test: ok\n");
     return fail ? 1 : 0;
 }

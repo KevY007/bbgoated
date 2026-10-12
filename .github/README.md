@@ -38,12 +38,13 @@ bbgoated changes how it is drawn and patched, never how it talks to other player
 | Upstream fixes ahead of their merge: TLS trust (#74), chromatic aberration toggle on Windows (#70), a ~14 MiB/min trace leak (#117) | Windows bugs | n/a |
 | Intel tone-map fix (Kyo's), Intel CPUs only | Dark/black tone mapping in DLC areas on Intel CPUs | `intel-tonemap = false` under `[patches]` |
 | Fully separate from bbhost and other launchers: its own config (`%APPDATA%\bbgoated`) and data (`%LOCALAPPDATA%\bbgoated\data`) | On the first start it copies your bbhost settings, key bindings, account, official plugins, saves and shader caches. After that the two never share a file, and bbhost's files are only ever read | `bbgoated.toml`, `bbgoated-options.toml` |
+| NVIDIA DLAA ([the DLAA fork](https://github.com/YoucefNabil/bbhost)), RTX cards | Clean, stable edges at native resolution, on the HDR scene before post-processing. The game's own anti-aliasing is turned off while DLAA runs and comes back when you turn DLAA off; your setting is kept either way | on by default; `Ctrl+F1` or `Ctrl+F5` turns it off and on; `enabled = false` under `[dlaa]` |
 | Light-grid tile basis switch | Measures window-sized vs render-sized light tiles | `BBHOST_LIGHT_GRID_BASIS=render` |
 | Red-zone audit | Counts Windows exceptions inside game functions that use their red zone (a crash class on Intel 12th gen+) | `BBHOST_REDZONE_AUDIT=1` (off by default, observe-only) |
 | Area check on Windows | Automated, repeatable performance A/B at 12 places in the game | `tools/area_check.py --probe` |
 
 **Coming next** (see the plan in the workspace repo):
-- DLSS Super Resolution, DLAA and FSR 3.1 in the in-game graphics menu, ported from PR #73;
+- DLSS Super Resolution and FSR 3.1 in the in-game graphics menu, ported from PR #73 (DLAA is in already);
 - upscaling on the HDR scene before post-processing;
 - renderer work on the GPU overhead measured on Windows;
 - every retail region;

@@ -53,6 +53,13 @@ void host_opt_set_frame_cap(int fps);
 // same file, so a change made in game is the change the F10 screen shows and
 // bbhost-options.toml keeps. Unknown names are ignored.
 void host_opt_set(const char* key, bool on);
+// bbgoated: holds one at a live value the options file does not keep - the
+// file keeps the player's choice (DLAA holding the game's anti-aliasing off,
+// host/dlaa_aa.h). A change the player makes to it ends the hold, and is
+// their new choice; host_opt_release gives it back the file's value.
+void host_opt_hold(const char* key, bool on);
+void host_opt_release(const char* key);
+bool host_opt_held(const char* key);
 // A setting as the index of its value (mouse_sens: 0..10), and setting it;
 // -1 for an unknown name. Saved at once, like host_opt_set.
 int host_opt_index(const char* key);

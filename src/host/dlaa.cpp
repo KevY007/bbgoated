@@ -1019,21 +1019,20 @@ bool dlaa_running() {
 // anti-aliasing is held off; it comes back when DLAA is turned off, if the
 // player had it on (host/dlaa_aa.h). Looked at only when DLAA or a setting changed.
 void dlaa_aa_tick() {
-    static DlaaAaState state;
     static bool last_active = false;
     static std::uint64_t last_serial = 0;
     const bool active = dlaa_running();
     const std::uint64_t serial = host_opt_serial();
     if (active == last_active && serial == last_serial) return;
     last_active = active;
-    switch (dlaa_aa_step(&state, active, host_opt_get("anti_alias"))) {
-    case kDlaaAaTurnOff:
-        host_opt_set("anti_alias", false);
-        host_log("dlaa: the game's anti-aliasing is off while DLAA runs (it comes back when DLAA is turned off)");
+    switch (dlaa_aa_step(active, host_opt_get("anti_alias"), host_opt_held("anti_alias"))) {
+    case kDlaaAaHold:
+        host_opt_hold("anti_alias", false);
+        host_log("dlaa: the game's anti-aliasing is off while DLAA runs (your setting is kept; it is back when DLAA is turned off)");
         break;
-    case kDlaaAaTurnOn:
-        host_opt_set("anti_alias", true);
-        host_log("dlaa: the game's anti-aliasing is back on (DLAA off)");
+    case kDlaaAaRelease:
+        host_opt_release("anti_alias");
+        host_log("dlaa: the game's anti-aliasing is back to your setting (DLAA off)");
         break;
     case kDlaaAaKeep:
         break;
